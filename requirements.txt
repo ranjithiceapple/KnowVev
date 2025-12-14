@@ -1,0 +1,39 @@
+# ---------------------------
+# Web Framework
+# ---------------------------
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+
+# ---------------------------
+# Vector Database
+# ---------------------------
+qdrant-client==1.7.0
+grpcio==1.60.0
+grpcio-tools==1.60.0
+
+# ---------------------------
+# Machine Learning / Embeddings
+# ---------------------------
+sentence-transformers==2.3.1
+transformers==4.36.2
+tokenizers==0.15.0
+huggingface-hub==0.20.3
+
+# IMPORTANT: torch is optional in requirements because it's HUGE.
+# Install the CPU-only wheel at runtime or include:
+torch==2.2.0 --index-url https://download.pytorch.org/whl/cpu
+# If Docker image fails to install torch, I will adjust Dockerfile for you.
+
+# ---------------------------
+# Document Processing
+# ---------------------------
+PyMuPDF==1.23.7
+python-docx==1.1.0
+python-multipart==0.0.6
+
+# ---------------------------
+# Data / Helpers
+# ---------------------------
+numpy==1.24.3
+pydantic==2.5.0
+typing_extensions==4.9.0

@@ -1,0 +1,73 @@
+version: "3.9"
+
+services:
+  # -------------------------------------
+  # Qdrant Vector Database
+  # -------------------------------------
+  knowvec_db:
+    image: qdrant/qdrant:v1.13.3
+    container_name: knowvec_qdrant_db
+    restart: unless-stopped
+    ports:
+      - "7333:6333"   # REST
+      - "7334:6334"   # gRPC
+    volumes:
+      - knowvec_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "http://localhost:6333/collections"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+    networks:
+      - knowvec_network
+
+  # -------------------------------------
+  # KnowVec FastAPI Service
+  # -------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: knowvec_api:latest
+    container_name: knowvec_api
+    restart: unless-stopped
+
+    depends_on:
+      knowvec_db:
+        condition: service_healthy
+
+    environment:
+      QDRANT_URL: "http://knowvec_db:6333"
+      EMBEDDING_MODEL: "all-MiniLM-L6-v2"
+      HF_HOME: "/home/appuser/.cache/huggingface"
+      TRANSFORMERS_CACHE: "/home/appuser/.cache/huggingface"
+
+    ports:
+      - "8007:8007"
+
+    volumes:
+      # Mount your code ONLY → keeps libraries intact
+      - .:/app/src
+      # Persistent HuggingFace model cache
+      - hf_models:/home/appuser/.cache/huggingface
+
+    networks:
+      - knowvec_network
+
+
+# -------------------------------------
+# VOLUMES
+# -------------------------------------
+volumes:
+  knowvec_data:
+    driver: local
+  hf_models:
+    driver: local
+
+# -------------------------------------
+# NETWORK
+# -------------------------------------
+networks:
+  knowvec_network:
+    driver: bridge
