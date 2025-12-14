@@ -9,6 +9,9 @@ import re
 import unicodedata
 from typing import List, Set, Tuple, Optional
 from collections import defaultdict
+from logger_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class StructuralNormalizer:
@@ -643,11 +646,13 @@ class TextNormalizationPipeline:
     """
 
     def __init__(self):
+        logger.info("Initializing TextNormalizationPipeline")
         self.structural = StructuralNormalizer()
         self.noise = NoiseRemover()
         self.semantic = SemanticNormalizer()
         self.ocr = OCRCorrector()
         self.domain = DomainNormalizer()
+        logger.info("TextNormalizationPipeline initialized with all normalizers")
 
     def normalize(
         self,
@@ -676,23 +681,48 @@ class TextNormalizationPipeline:
         Returns:
             Fully normalized text
         """
+        original_length = len(text)
+        logger.info(
+            f"Starting text normalization - Length: {original_length} chars, "
+            f"Structural: {apply_structural}, Noise: {apply_noise_removal}, "
+            f"Semantic: {apply_semantic}, OCR: {apply_ocr_correction}, Domain: {apply_domain}"
+        )
+
         if apply_structural:
+            logger.debug("Applying structural normalization")
             text = self.structural.normalize_all(text)
+            logger.debug(f"Structural normalization complete - Length: {len(text)} chars")
 
         if apply_noise_removal:
+            logger.debug("Applying noise removal")
             text = self.noise.remove_all(text, custom_header_patterns)
+            logger.debug(f"Noise removal complete - Length: {len(text)} chars")
 
         if apply_ocr_correction:
+            logger.debug("Applying OCR correction")
             text = self.ocr.correct_all(text)
+            logger.debug(f"OCR correction complete - Length: {len(text)} chars")
 
         if apply_semantic:
+            logger.debug("Applying semantic normalization")
             text = self.semantic.normalize_all(text)
+            logger.debug(f"Semantic normalization complete - Length: {len(text)} chars")
 
         if apply_domain:
+            logger.debug("Applying domain normalization")
             text = self.domain.normalize_all(text, custom_disclaimer_patterns)
+            logger.debug(f"Domain normalization complete - Length: {len(text)} chars")
 
         # Final cleanup
         text = text.strip()
+
+        final_length = len(text)
+        reduction = original_length - final_length
+        logger.info(
+            f"Text normalization complete - Original: {original_length} chars, "
+            f"Final: {final_length} chars, Reduced by: {reduction} chars "
+            f"({(reduction/original_length*100):.1f}% reduction)"
+        )
 
         return text
 

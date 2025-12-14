@@ -5,17 +5,24 @@ from typing import Optional, List
 import shutil
 import uuid
 import os
+import time
 
 from document_to_vector_service import (
     DocumentToVectorService,
     ServiceConfig
 )
+from logger_config import get_logger
+
+# Initialize logger
+logger = get_logger(__name__)
 
 # ---------------------------------------------------------
 # Load config from environment (Docker passes variables)
 # ---------------------------------------------------------
+logger.info("Loading configuration from environment variables")
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+logger.info(f"Configuration loaded - QDRANT_URL: {QDRANT_URL}, EMBEDDING_MODEL: {EMBEDDING_MODEL}")
 
 service_config = ServiceConfig(
     qdrant_url="http://localhost:6333",  # Your existing Qdrant
@@ -23,15 +30,21 @@ service_config = ServiceConfig(
     embedding_model_name="all-MiniLM-L6-v2",
     vector_size=384
 )
+logger.info(f"Service config created - Collection: {service_config.qdrant_collection}, Vector size: {service_config.vector_size}")
 
+logger.info("Initializing DocumentToVectorService")
 service = DocumentToVectorService(service_config)
+logger.info("DocumentToVectorService initialized successfully")
 
 # ---------------------------------------------------------
 # FASTAPI APP
 # ---------------------------------------------------------
+logger.info("Creating FastAPI application")
 app = FastAPI(title="KnowVec RAG Pipeline API")
+logger.info("FastAPI application created successfully")
 
 # CORS
+logger.info("Configuring CORS middleware")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -39,6 +52,40 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+logger.info("CORS middleware configured")
+
+
+# Request logging middleware
+@app.middleware("http")
+async def log_requests(request, call_next):
+    """Log all incoming requests and responses."""
+    request_id = str(uuid.uuid4())
+    start_time = time.time()
+
+    logger.info(
+        f"Request started - ID: {request_id}, Method: {request.method}, "
+        f"Path: {request.url.path}, Client: {request.client.host if request.client else 'unknown'}"
+    )
+
+    try:
+        response = await call_next(request)
+        duration = time.time() - start_time
+
+        logger.info(
+            f"Request completed - ID: {request_id}, Method: {request.method}, "
+            f"Path: {request.url.path}, Status: {response.status_code}, "
+            f"Duration: {duration:.3f}s"
+        )
+
+        return response
+    except Exception as e:
+        duration = time.time() - start_time
+        logger.error(
+            f"Request failed - ID: {request_id}, Method: {request.method}, "
+            f"Path: {request.url.path}, Duration: {duration:.3f}s, Error: {str(e)}",
+            exc_info=True
+        )
+        raise
 
 
 # ---------------------------------------------------------
@@ -57,6 +104,7 @@ class SearchResponse(BaseModel):
 
 @app.get("/")
 def root():
+    logger.debug("Root endpoint accessed")
     return {"message": "KnowVec RAG Pipeline API is running 🚀"}
 
 
@@ -68,25 +116,49 @@ async def process_document(file: UploadFile = File(...)):
     """
     Upload a document → Extract → Normalize → Chunk → Embed → Store in Qdrant
     """
+    start_time = time.time()
+    logger.info(f"Document processing started - Filename: {file.filename}, Content-Type: {file.content_type}")
+
     try:
         # Temporary file path
         temp_file_path = f"/tmp/{uuid.uuid4()}_{file.filename}"
+        logger.debug(f"Created temporary file path: {temp_file_path}")
 
         # Save uploaded file to temp folder
+        logger.info(f"Saving uploaded file to temporary location: {temp_file_path}")
         with open(temp_file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
+        file_size = os.path.getsize(temp_file_path)
+        logger.info(f"File saved successfully - Size: {file_size} bytes")
 
         # Process document using the full pipeline
+        logger.info(f"Starting document processing pipeline for: {file.filename}")
         result = service.process_document(temp_file_path)
+        logger.info(f"Document processing pipeline completed for: {file.filename}")
 
         # Cleanup
+        logger.debug(f"Removing temporary file: {temp_file_path}")
         os.remove(temp_file_path)
+        logger.debug("Temporary file removed successfully")
 
         if not result.success:
+            logger.error(
+                f"Document processing failed - Filename: {file.filename}, "
+                f"Error: {result.error_message}"
+            )
             raise HTTPException(
                 status_code=500,
                 detail=f"Processing failed: {result.error_message}"
             )
+
+        duration = time.time() - start_time
+        logger.info(
+            f"Document processed successfully - Filename: {file.filename}, "
+            f"Doc ID: {result.doc_id}, Pages: {result.pages_extracted}, "
+            f"Chunks: {result.chunks_created}, Unique: {result.unique_chunks}, "
+            f"Vectors: {result.vectors_stored}, Pipeline time: {result.total_time:.2f}s, "
+            f"Total time: {duration:.2f}s"
+        )
 
         return {
             "message": "Document processed successfully",
@@ -98,7 +170,15 @@ async def process_document(file: UploadFile = File(...)):
             "total_time": result.total_time
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
+        duration = time.time() - start_time
+        logger.error(
+            f"Unexpected error during document processing - Filename: {file.filename}, "
+            f"Duration: {duration:.2f}s, Error: {str(e)}",
+            exc_info=True
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -114,12 +194,20 @@ def search_documents(
     """
     Semantic search through Qdrant embeddings
     """
+    start_time = time.time()
+    logger.info(
+        f"Search request received - Query: '{q[:100]}{'...' if len(q) > 100 else ''}', "
+        f"Limit: {limit}, Score threshold: {score_threshold}"
+    )
+
     try:
+        logger.debug(f"Executing search with query: {q}")
         results = service.search(
             query=q,
             limit=limit,
             score_threshold=score_threshold
         )
+        logger.debug(f"Search returned {len(results)} results")
 
         formatted = [
             SearchResponse(
@@ -131,9 +219,21 @@ def search_documents(
             for r in results
         ]
 
+        duration = time.time() - start_time
+        logger.info(
+            f"Search completed successfully - Query: '{q[:50]}{'...' if len(q) > 50 else ''}', "
+            f"Results: {len(formatted)}, Duration: {duration:.3f}s"
+        )
+
         return formatted
 
     except Exception as e:
+        duration = time.time() - start_time
+        logger.error(
+            f"Search failed - Query: '{q[:50]}{'...' if len(q) > 50 else ''}', "
+            f"Duration: {duration:.3f}s, Error: {str(e)}",
+            exc_info=True
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -145,7 +245,12 @@ def get_stats():
     """
     Returns Qdrant collection stats
     """
+    logger.info("Stats request received")
     try:
-        return service.get_collection_stats()
+        logger.debug("Fetching collection stats from service")
+        stats = service.get_collection_stats()
+        logger.info(f"Stats retrieved successfully: {stats}")
+        return stats
     except Exception as e:
+        logger.error(f"Failed to retrieve stats - Error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

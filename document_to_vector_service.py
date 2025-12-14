@@ -13,6 +13,8 @@ from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, field
 import uuid
 from datetime import datetime
+import time
+from logger_config import get_logger
 
 # Import pipeline components
 from document_processor import extract_text_from_document
@@ -21,14 +23,15 @@ from enterprise_chunking_pipeline import chunk_with_normalization, ChunkingConfi
 from embedding_preparation import prepare_for_embedding
 from qdrant_storage import QdrantStorage, QdrantConfig, setup_qdrant_collection
 
+logger = get_logger(__name__)
+
 try:
     from sentence_transformers import SentenceTransformer
     EMBEDDING_MODEL_AVAILABLE = True
+    logger.info("SentenceTransformer module loaded successfully")
 except ImportError:
     EMBEDDING_MODEL_AVAILABLE = False
-    logging.warning("sentence-transformers not installed. Install with: pip install sentence-transformers")
-
-logger = logging.getLogger(__name__)
+    logger.warning("sentence-transformers not installed. Install with: pip install sentence-transformers")
 
 
 @dataclass
@@ -127,31 +130,45 @@ class DocumentToVectorService:
     """
 
     def __init__(self, config: Optional[ServiceConfig] = None):
-        self.config = config or ServiceConfig()
+        init_start = time.time()
+        logger.info("Initializing DocumentToVectorService")
 
-        # 🔥 Load environment variables (Docker override)
+        self.config = config or ServiceConfig()
+        logger.debug(f"Service config: {self.config}")
+
+        # Load environment variables (Docker override)
         import os
         env_qdrant_url = os.getenv("QDRANT_URL")
         env_model_name = os.getenv("EMBEDDING_MODEL")
 
         if env_qdrant_url:
+            logger.info(f"Overriding Qdrant URL from environment: {env_qdrant_url}")
             self.config.qdrant_url = env_qdrant_url
 
         if env_model_name:
+            logger.info(f"Overriding embedding model from environment: {env_model_name}")
             self.config.embedding_model_name = env_model_name
 
         logger.info(f"Using Qdrant URL: {self.config.qdrant_url}")
         logger.info(f"Using Embedding Model: {self.config.embedding_model_name}")
+        logger.info(
+            f"Pipeline settings - Chunking: max={self.config.max_chunk_size}, target={self.config.target_chunk_size}, "
+            f"overlap={self.config.overlap_size}, Deduplication: {self.config.deduplicate_chunks}"
+        )
 
         # Initialize embedding model
         if EMBEDDING_MODEL_AVAILABLE:
             logger.info(f"Loading embedding model: {self.config.embedding_model_name}")
+            model_start = time.time()
             self.embedding_model = SentenceTransformer(self.config.embedding_model_name)
-            logger.info("✅ Embedding model loaded")
+            model_duration = time.time() - model_start
+            logger.info(f"Embedding model loaded in {model_duration:.2f}s")
         else:
+            logger.error("sentence-transformers not available - cannot initialize service")
             raise ImportError("sentence-transformers required. Install with: pip install sentence-transformers")
 
         # Initialize Qdrant storage
+        logger.info("Initializing Qdrant storage")
         self.qdrant_config = QdrantConfig(
             url=self.config.qdrant_url,
             api_key=self.config.qdrant_api_key,
@@ -161,11 +178,14 @@ class DocumentToVectorService:
         )
 
         self.storage = QdrantStorage(self.qdrant_config)
+        logger.info("Qdrant storage initialized")
 
         # Setup collection
+        logger.info("Ensuring Qdrant collection exists")
         self._ensure_collection_exists()
 
-        logger.info("✅ Document to Vector Service initialized")
+        init_duration = time.time() - init_start
+        logger.info(f"DocumentToVectorService initialized successfully in {init_duration:.2f}s")
 
 
     def _ensure_collection_exists(self):
@@ -194,15 +214,15 @@ class DocumentToVectorService:
         Returns:
             ProcessingResult with statistics and timing
         """
-        import time
-
         start_time = time.time()
 
         # Generate doc_id if not provided
         if doc_id is None:
             doc_id = str(uuid.uuid4())
+            logger.debug(f"Generated doc_id: {doc_id}")
 
         file_name = Path(file_path).name
+        logger.info(f"[{doc_id}] Starting document processing pipeline for: {file_name}")
 
         result = ProcessingResult(
             success=False,

@@ -19,8 +19,10 @@ from typing import List, Dict, Optional, Set, Tuple, Any
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 import json
+import time
+from logger_config import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -366,6 +368,7 @@ class EmbeddingPreparationPipeline:
         version: str = "1.0",
         pipeline_name: str = "default"
     ):
+        logger.info("Initializing EmbeddingPreparationPipeline")
         self.text_cleaner = TextCleaner()
         self.hash_generator = HashGenerator()
         self.metadata_builder = MetadataBuilder()
@@ -375,6 +378,11 @@ class EmbeddingPreparationPipeline:
         self.use_semantic_hash = use_semantic_hash
         self.version = version
         self.pipeline_name = pipeline_name
+        logger.info(
+            f"EmbeddingPreparationPipeline initialized - Pipeline: {pipeline_name}, "
+            f"Version: {version}, Aggressive cleaning: {aggressive_cleaning}, "
+            f"Hash algorithm: {hash_algorithm}, Semantic hash: {use_semantic_hash}"
+        )
 
     def prepare_chunks(
         self,
@@ -393,7 +401,11 @@ class EmbeddingPreparationPipeline:
         Returns:
             Tuple of (embedding_records, deduplication_stats)
         """
-        logger.info(f"Preparing {len(chunks)} chunks for embedding")
+        start_time = time.time()
+        logger.info(
+            f"Starting chunk preparation - Chunks: {len(chunks)}, "
+            f"Deduplicate: {deduplicate}, Keep text: {keep_normalized_text}"
+        )
 
         embedding_records = []
         seen_hashes: Dict[str, str] = {}  # hash -> chunk_id
@@ -472,7 +484,13 @@ class EmbeddingPreparationPipeline:
             duplicate_groups=duplicate_groups
         )
 
-        logger.info(f"Preparation complete: {stats.unique_chunks} unique chunks, {stats.duplicate_chunks} duplicates ({stats.deduplication_rate:.1f}%)")
+        duration = time.time() - start_time
+        logger.info(
+            f"Chunk preparation complete - Total: {stats.total_chunks}, "
+            f"Unique: {stats.unique_chunks}, Duplicates: {stats.duplicate_chunks} "
+            f"({stats.deduplication_rate:.1f}% deduplication rate), "
+            f"Duration: {duration:.2f}s"
+        )
 
         return embedding_records, stats
 

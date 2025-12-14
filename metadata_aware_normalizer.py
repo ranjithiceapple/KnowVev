@@ -12,8 +12,10 @@ from typing import List, Dict, Optional, Tuple, Set
 from dataclasses import dataclass, field
 from copy import deepcopy
 import logging
+import time
+from logger_config import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -396,13 +398,17 @@ class MetadataAwareNormalizer:
     """
 
     def __init__(self, config: Optional[NormalizationConfig] = None):
+        logger.info("Initializing MetadataAwareNormalizer")
         self.config = config or NormalizationConfig()
+        logger.debug(f"Config: {self.config}")
         self.protection = ProtectionMarker()
 
         # NEW: Advanced components
+        logger.debug("Initializing advanced components")
         self.column_detector = MultiColumnDetector(self.config.multi_column_threshold)
         self.hierarchy_preserver = HierarchyPreserver()
         self.crosschecker = MetadataCrossChecker()
+        logger.info("MetadataAwareNormalizer initialization complete")
 
         # Patterns for structural normalization
         self.hyphen_linebreak_pattern = re.compile(r'(\w+)-\s*\n\s*(\w+)')
@@ -454,21 +460,41 @@ class MetadataAwareNormalizer:
         Returns:
             Tuple of (normalized_full_text, list_of_page_results)
         """
+        start_time = time.time()
+        logger.info(
+            f"Starting document normalization - File: {extraction_result.metadata.file_name}, "
+            f"Pages: {len(extraction_result.pages)}"
+        )
+
         page_results = []
         normalized_pages = []
 
         # Filter out TOC pages if configured
+        filter_start = time.time()
         pages_to_process = self._filter_toc_pages(
             extraction_result.pages,
             extraction_result.metadata
         )
+        filter_duration = time.time() - filter_start
 
-        logger.info(f"Normalizing {len(pages_to_process)} pages (filtered from {len(extraction_result.pages)})")
+        logger.info(
+            f"Page filtering complete - Processing {len(pages_to_process)} pages "
+            f"(filtered {len(extraction_result.pages) - len(pages_to_process)} pages) "
+            f"in {filter_duration:.2f}s"
+        )
 
         # Process each page individually
-        for page_meta in pages_to_process:
+        for idx, page_meta in enumerate(pages_to_process, 1):
+            page_start = time.time()
             page_result = self._normalize_page(page_meta, extraction_result.metadata)
+            page_duration = time.time() - page_start
+
             page_results.append(page_result)
+            logger.debug(
+                f"Page {page_meta.page_number} normalized ({idx}/{len(pages_to_process)}) - "
+                f"Chars: {page_result.original_char_count} → {page_result.normalized_char_count}, "
+                f"Duration: {page_duration:.2f}s"
+            )
 
             # Add page marker if configured
             if self.config.add_page_markers:
@@ -480,7 +506,17 @@ class MetadataAwareNormalizer:
         # Combine normalized pages
         full_normalized_text = "\n\n".join(normalized_pages)
 
-        logger.info(f"Normalization complete: {len(page_results)} pages processed")
+        total_duration = time.time() - start_time
+        total_original_chars = sum(r.original_char_count for r in page_results)
+        total_normalized_chars = len(full_normalized_text)
+
+        logger.info(
+            f"Document normalization complete - File: {extraction_result.metadata.file_name}, "
+            f"Pages: {len(page_results)}, "
+            f"Chars: {total_original_chars} → {total_normalized_chars} "
+            f"({((total_original_chars - total_normalized_chars) / total_original_chars * 100):.1f}% reduction), "
+            f"Total duration: {total_duration:.2f}s"
+        )
 
         return full_normalized_text, page_results
 

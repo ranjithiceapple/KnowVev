@@ -19,8 +19,10 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 import uuid
 from datetime import datetime
+import time
+from logger_config import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class BoundaryType(Enum):
@@ -387,9 +389,16 @@ class EnterpriseChunkingPipeline:
     """
 
     def __init__(self, config: Optional[ChunkingConfig] = None):
+        logger.info("Initializing EnterpriseChunkingPipeline")
         self.config = config or ChunkingConfig()
+        logger.info(
+            f"Chunking config - Max size: {self.config.max_chunk_size}, "
+            f"Min size: {self.config.min_chunk_size}, Target size: {self.config.target_chunk_size}, "
+            f"Overlap: {self.config.enable_overlap} ({self.config.overlap_size} chars)"
+        )
         self.boundary_detector = BoundaryDetector()
         self.semantic_chunker = SemanticChunker(self.config)
+        logger.info("EnterpriseChunkingPipeline initialization complete")
 
     def chunk_document(
         self,
@@ -408,38 +417,60 @@ class EnterpriseChunkingPipeline:
         Returns:
             List of ChunkMetadata objects
         """
+        start_time = time.time()
+
         if doc_id is None:
             doc_id = str(uuid.uuid4())
+            logger.debug(f"Generated doc_id: {doc_id}")
 
         # Use normalized text if provided, otherwise use extracted text
         text = normalized_text if normalized_text else extraction_result.text
 
-        logger.info(f"Starting chunking for document: {extraction_result.metadata.file_name}")
+        logger.info(
+            f"Starting chunking for document: {extraction_result.metadata.file_name} "
+            f"(doc_id: {doc_id[:8]}...)"
+        )
         logger.info(f"Document length: {len(text)} characters, {len(extraction_result.pages)} pages")
 
         # Step 1: Page-level chunking with mapping
+        step_start = time.time()
         page_chunks = self._chunk_by_pages(text, extraction_result)
-        logger.info(f"Step 1: Created {len(page_chunks)} page-level chunks")
+        step_duration = time.time() - step_start
+        logger.info(f"Step 1: Created {len(page_chunks)} page-level chunks in {step_duration:.2f}s")
 
         # Step 2: Section-aware chunking
+        step_start = time.time()
         section_chunks = self._chunk_by_sections(page_chunks, extraction_result)
-        logger.info(f"Step 2: Created {len(section_chunks)} section-aware chunks")
+        step_duration = time.time() - step_start
+        logger.info(f"Step 2: Created {len(section_chunks)} section-aware chunks in {step_duration:.2f}s")
 
         # Step 3: Apply size constraints and split large chunks
+        step_start = time.time()
         sized_chunks = self._apply_size_constraints(section_chunks)
-        logger.info(f"Step 3: Applied size constraints, now {len(sized_chunks)} chunks")
+        step_duration = time.time() - step_start
+        logger.info(f"Step 3: Applied size constraints, now {len(sized_chunks)} chunks in {step_duration:.2f}s")
 
         # Step 4: Apply semantic windowing (overlap)
+        step_start = time.time()
         overlapped_chunks = self._apply_semantic_windowing(sized_chunks)
-        logger.info(f"Step 4: Applied semantic windowing")
+        step_duration = time.time() - step_start
+        logger.info(f"Step 4: Applied semantic windowing in {step_duration:.2f}s")
 
         # Step 5: Build comprehensive metadata
+        step_start = time.time()
         final_chunks = self._build_chunk_metadata(
             overlapped_chunks,
             extraction_result,
             doc_id
         )
-        logger.info(f"Step 5: Built metadata for {len(final_chunks)} final chunks")
+        step_duration = time.time() - step_start
+        logger.info(f"Step 5: Built metadata for {len(final_chunks)} final chunks in {step_duration:.2f}s")
+
+        total_duration = time.time() - start_time
+        logger.info(
+            f"Chunking complete for {extraction_result.metadata.file_name} - "
+            f"Final chunks: {len(final_chunks)}, Total time: {total_duration:.2f}s"
+        )
 
         return final_chunks
 
@@ -448,8 +479,10 @@ class EnterpriseChunkingPipeline:
         Step 1: Page-level chunking.
         Preserves page boundaries and mapping.
         """
+        logger.debug("Starting page-level chunking")
         chunks = []
         page_boundaries = self.boundary_detector.find_page_boundaries(text)
+        logger.debug(f"Found {len(page_boundaries)} page boundaries")
 
         if not page_boundaries:
             # No page markers found - treat as single page
