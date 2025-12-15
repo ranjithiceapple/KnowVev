@@ -16,6 +16,7 @@ from document_to_vector_service import (
     ServiceConfig
 )
 from logger_config import get_logger
+from list_documents_and_embeddings import DocumentLister
 
 # Initialize logger
 logger = get_logger(__name__)
@@ -39,6 +40,14 @@ logger.info(f"Service config created - Collection: {service_config.qdrant_collec
 logger.info("Initializing DocumentToVectorService")
 service = DocumentToVectorService(service_config)
 logger.info("DocumentToVectorService initialized successfully")
+
+# Initialize DocumentLister for listing/managing documents
+logger.info("Initializing DocumentLister")
+document_lister = DocumentLister(
+    qdrant_url=service_config.qdrant_url,
+    collection_name=service_config.qdrant_collection
+)
+logger.info("DocumentLister initialized successfully")
 
 # ---------------------------------------------------------
 # FASTAPI APP
@@ -130,6 +139,36 @@ class MetadataFilterRequest(BaseModel):
     )
     limit: int = Field(default=100, ge=1, le=1000, description="Maximum number of results")
     offset: int = Field(default=0, ge=0, description="Pagination offset")
+
+
+class DocumentResponse(BaseModel):
+    """Response model for document information"""
+    doc_id: str
+    file_name: str
+    total_chunks: int
+    total_pages: int
+    has_summary: bool
+    created_at: str
+    version: str
+
+
+class DocumentDetailResponse(BaseModel):
+    """Response model for detailed document information"""
+    doc_id: str
+    file_name: str
+    total_chunks: int
+    total_pages: int
+    has_summary: bool
+    chunks: List[Dict[str, Any]]
+
+
+class DeleteDocumentResponse(BaseModel):
+    """Response model for document deletion"""
+    success: bool
+    doc_id: str
+    file_name: Optional[str] = None
+    chunks_deleted: int
+    message: str
 
 
 # ---------------------------------------------------------
@@ -410,4 +449,385 @@ def get_stats():
         return stats
     except Exception as e:
         logger.error(f"Failed to retrieve stats - Error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------
+# 6️⃣ LIST ALL DOCUMENTS
+# ---------------------------------------------------------
+@app.get("/documents", response_model=List[DocumentResponse])
+def list_documents(limit: int = Query(1000, ge=1, le=10000, description="Maximum documents to return")):
+    """
+    List all documents stored in the vector database.
+
+    Returns basic metadata for each document including:
+    - Document ID
+    - File name
+    - Total chunks
+    - Total pages
+    - Whether document has a summary
+    - Creation timestamp
+
+    Example response:
+    ```json
+    [
+        {
+            "doc_id": "abc-123-xyz",
+            "file_name": "report.pdf",
+            "total_chunks": 45,
+            "total_pages": 25,
+            "has_summary": true,
+            "created_at": "2024-01-15T10:30:00",
+            "version": "1.0"
+        }
+    ]
+    ```
+    """
+    start_time = time.time()
+    logger.info(f"List documents request received - Limit: {limit}")
+
+    try:
+        documents = document_lister.list_documents(limit=limit)
+
+        duration = time.time() - start_time
+        logger.info(
+            f"List documents completed - Found: {len(documents)} documents, "
+            f"Duration: {duration:.3f}s"
+        )
+
+        return documents
+
+    except Exception as e:
+        duration = time.time() - start_time
+        logger.error(
+            f"List documents failed - Duration: {duration:.3f}s, Error: {str(e)}",
+            exc_info=True
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------
+# 7️⃣ GET DOCUMENT DETAILS
+# ---------------------------------------------------------
+@app.get("/documents/{doc_id}", response_model=DocumentDetailResponse)
+def get_document_details(
+    doc_id: str,
+    include_embeddings: bool = Query(False, description="Include vector embeddings in response")
+):
+    """
+    Get detailed information about a specific document.
+
+    Returns all chunks with metadata for the document.
+    Optionally includes vector embeddings if requested.
+
+    Args:
+        doc_id: Document ID (full UUID)
+        include_embeddings: Whether to include 384-dim vectors (default: false)
+
+    Example response:
+    ```json
+    {
+        "doc_id": "abc-123-xyz",
+        "file_name": "report.pdf",
+        "total_chunks": 45,
+        "total_pages": 25,
+        "has_summary": true,
+        "chunks": [
+            {
+                "chunk_id": "chunk-1",
+                "chunk_index": 0,
+                "page_start": 1,
+                "page_end": 2,
+                "section_title": "Introduction",
+                "text_preview": "This document describes..."
+            }
+        ]
+    }
+    ```
+    """
+    start_time = time.time()
+    logger.info(f"Get document details request - Doc ID: {doc_id[:8]}..., Include embeddings: {include_embeddings}")
+
+    try:
+        # Get chunks for document
+        chunks = document_lister.get_document_chunks(doc_id, include_vectors=include_embeddings)
+
+        if not chunks:
+            logger.warning(f"Document not found: {doc_id}")
+            raise HTTPException(status_code=404, detail=f"Document not found: {doc_id}")
+
+        # Build response
+        response = {
+            "doc_id": doc_id,
+            "file_name": chunks[0].get('file_name', 'Unknown') if chunks else "Unknown",
+            "total_chunks": len(chunks),
+            "total_pages": chunks[-1]['page_end'] if chunks else 0,
+            "has_summary": any(c.get('section_title') == '[DOCUMENT SUMMARY]' for c in chunks),
+            "chunks": chunks
+        }
+
+        duration = time.time() - start_time
+        logger.info(
+            f"Get document details completed - Chunks: {len(chunks)}, Duration: {duration:.3f}s"
+        )
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        duration = time.time() - start_time
+        logger.error(
+            f"Get document details failed - Duration: {duration:.3f}s, Error: {str(e)}",
+            exc_info=True
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------
+# 8️⃣ GET DOCUMENT EMBEDDINGS
+# ---------------------------------------------------------
+@app.get("/documents/{doc_id}/embeddings")
+def get_document_embeddings(doc_id: str):
+    """
+    Get all embeddings (vectors) for a specific document.
+
+    Returns the 384-dimensional embedding vectors for each chunk.
+    Useful for:
+    - Analyzing document representation
+    - Exporting for external processing
+    - Debugging embedding quality
+
+    Warning: Response can be large for documents with many chunks.
+    Each vector is 384 dimensions (floats).
+
+    Example response:
+    ```json
+    {
+        "doc_id": "abc-123-xyz",
+        "total_chunks": 45,
+        "vector_dimension": 384,
+        "embeddings": [
+            {
+                "chunk_id": "chunk-1",
+                "chunk_index": 0,
+                "vector": [0.123, -0.456, 0.789, ...]
+            }
+        ]
+    }
+    ```
+    """
+    start_time = time.time()
+    logger.info(f"Get document embeddings request - Doc ID: {doc_id[:8]}...")
+
+    try:
+        chunks = document_lister.get_document_chunks(doc_id, include_vectors=True)
+
+        if not chunks:
+            logger.warning(f"Document not found: {doc_id}")
+            raise HTTPException(status_code=404, detail=f"Document not found: {doc_id}")
+
+        # Extract embeddings
+        embeddings = []
+        for chunk in chunks:
+            if 'vector' in chunk:
+                embeddings.append({
+                    "chunk_id": chunk['chunk_id'],
+                    "chunk_index": chunk['chunk_index'],
+                    "vector": chunk['vector']
+                })
+
+        response = {
+            "doc_id": doc_id,
+            "total_chunks": len(chunks),
+            "vector_dimension": embeddings[0].get('vector') and len(embeddings[0]['vector']) if embeddings else 0,
+            "embeddings": embeddings
+        }
+
+        duration = time.time() - start_time
+        logger.info(
+            f"Get document embeddings completed - Embeddings: {len(embeddings)}, Duration: {duration:.3f}s"
+        )
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        duration = time.time() - start_time
+        logger.error(
+            f"Get document embeddings failed - Duration: {duration:.3f}s, Error: {str(e)}",
+            exc_info=True
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------
+# 9️⃣ DELETE DOCUMENT
+# ---------------------------------------------------------
+@app.delete("/documents/{doc_id}", response_model=DeleteDocumentResponse)
+def delete_document(doc_id: str):
+    """
+    Delete a document and all its embeddings from the vector database.
+
+    This will:
+    - Delete all chunks associated with the document
+    - Delete all embeddings/vectors for the document
+    - Remove document from the collection
+
+    ⚠️ WARNING: This action is irreversible!
+
+    Args:
+        doc_id: Document ID to delete
+
+    Example response:
+    ```json
+    {
+        "success": true,
+        "doc_id": "abc-123-xyz",
+        "file_name": "report.pdf",
+        "chunks_deleted": 45,
+        "message": "Document and 45 embeddings deleted successfully"
+    }
+    ```
+    """
+    start_time = time.time()
+    logger.warning(f"Delete document request - Doc ID: {doc_id[:8]}...")
+
+    try:
+        # First, get document info before deletion
+        chunks = document_lister.get_document_chunks(doc_id, include_vectors=False)
+
+        if not chunks:
+            logger.warning(f"Document not found for deletion: {doc_id}")
+            raise HTTPException(status_code=404, detail=f"Document not found: {doc_id}")
+
+        file_name = chunks[0].get('file_name', 'Unknown') if chunks else None
+        chunks_count = len(chunks)
+
+        # Delete from Qdrant using filter
+        logger.warning(f"Deleting document {doc_id} with {chunks_count} chunks...")
+
+        delete_result = service.storage.delete_by_filter({
+            "doc_id": doc_id
+        })
+
+        duration = time.time() - start_time
+        logger.warning(
+            f"Document deleted - Doc ID: {doc_id[:8]}..., File: {file_name}, "
+            f"Chunks: {chunks_count}, Duration: {duration:.3f}s"
+        )
+
+        return {
+            "success": True,
+            "doc_id": doc_id,
+            "file_name": file_name,
+            "chunks_deleted": chunks_count,
+            "message": f"Document '{file_name}' and {chunks_count} embeddings deleted successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        duration = time.time() - start_time
+        logger.error(
+            f"Delete document failed - Duration: {duration:.3f}s, Error: {str(e)}",
+            exc_info=True
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------
+# 🔟 BULK DELETE DOCUMENTS
+# ---------------------------------------------------------
+@app.post("/documents/bulk-delete")
+def bulk_delete_documents(doc_ids: List[str] = Body(..., description="List of document IDs to delete")):
+    """
+    Delete multiple documents at once.
+
+    ⚠️ WARNING: This action is irreversible!
+
+    Request body:
+    ```json
+    ["doc-id-1", "doc-id-2", "doc-id-3"]
+    ```
+
+    Response:
+    ```json
+    {
+        "success": true,
+        "total_requested": 3,
+        "deleted": 3,
+        "failed": 0,
+        "results": [
+            {
+                "doc_id": "doc-id-1",
+                "success": true,
+                "chunks_deleted": 45
+            }
+        ]
+    }
+    ```
+    """
+    start_time = time.time()
+    logger.warning(f"Bulk delete request - {len(doc_ids)} documents")
+
+    try:
+        results = []
+        deleted_count = 0
+        failed_count = 0
+
+        for doc_id in doc_ids:
+            try:
+                # Get chunk count
+                chunks = document_lister.get_document_chunks(doc_id, include_vectors=False)
+                chunks_count = len(chunks)
+
+                if chunks_count == 0:
+                    results.append({
+                        "doc_id": doc_id,
+                        "success": False,
+                        "error": "Document not found"
+                    })
+                    failed_count += 1
+                    continue
+
+                # Delete
+                service.storage.delete_by_filter({"doc_id": doc_id})
+
+                results.append({
+                    "doc_id": doc_id,
+                    "success": True,
+                    "chunks_deleted": chunks_count
+                })
+                deleted_count += 1
+
+            except Exception as e:
+                results.append({
+                    "doc_id": doc_id,
+                    "success": False,
+                    "error": str(e)
+                })
+                failed_count += 1
+
+        duration = time.time() - start_time
+        logger.warning(
+            f"Bulk delete completed - Requested: {len(doc_ids)}, "
+            f"Deleted: {deleted_count}, Failed: {failed_count}, Duration: {duration:.3f}s"
+        )
+
+        return {
+            "success": True,
+            "total_requested": len(doc_ids),
+            "deleted": deleted_count,
+            "failed": failed_count,
+            "results": results
+        }
+
+    except Exception as e:
+        duration = time.time() - start_time
+        logger.error(
+            f"Bulk delete failed - Duration: {duration:.3f}s, Error: {str(e)}",
+            exc_info=True
+        )
         raise HTTPException(status_code=500, detail=str(e))
