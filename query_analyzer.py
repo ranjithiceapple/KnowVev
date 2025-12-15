@@ -236,7 +236,7 @@ class EnhancedQueryAnalyzer:
                     elif category == 'comparison':
                         sec_score += 0.9
                     elif category == 'multi_concept':
-                        sec_score += 0.5
+                        sec_score += 0.7  # Increased from 0.5 for better detection
 
         # Determine scope
         if doc_score > sec_score + 0.3:
@@ -322,7 +322,7 @@ class EnhancedQueryAnalyzer:
 
         # Moderate specificity with strong section indicators
         if specificity == QuerySpecificity.MODERATE:
-            if sec_score > 0.5:
+            if sec_score >= 0.5:  # Changed from > to >= to catch multi-concept queries
                 return False, True, False  # section-focused query
             else:
                 return True, False, False  # can include summary

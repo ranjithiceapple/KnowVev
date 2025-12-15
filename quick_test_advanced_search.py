@@ -8,7 +8,7 @@ import requests
 import json
 
 
-def quick_test(base_url="http://localhost:8000"):
+def quick_test(base_url="http://localhost:8007"):
     """Run quick tests on the three main test cases."""
 
     test_queries = [
