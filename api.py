@@ -17,6 +17,7 @@ from document_to_vector_service import (
 )
 from logger_config import get_logger
 from list_documents_and_embeddings import DocumentLister
+from query_intent_classifier import QueryIntentClassifier, QueryIntent
 
 # Initialize logger
 logger = get_logger(__name__)
@@ -48,6 +49,11 @@ document_lister = DocumentLister(
     collection_name=service_config.qdrant_collection
 )
 logger.info("DocumentLister initialized successfully")
+
+# Initialize Query Intent Classifier
+logger.info("Initializing QueryIntentClassifier")
+intent_classifier = QueryIntentClassifier()
+logger.info("QueryIntentClassifier initialized successfully")
 
 # ---------------------------------------------------------
 # FASTAPI APP
@@ -169,6 +175,26 @@ class DeleteDocumentResponse(BaseModel):
     file_name: Optional[str] = None
     chunks_deleted: int
     message: str
+
+
+class IntentClassificationResponse(BaseModel):
+    """Response model for intent classification"""
+    query: str
+    primary_intent: str
+    confidence: float
+    secondary_intents: Optional[List[Dict[str, Any]]] = None
+    recommended_filters: Optional[Dict[str, Any]] = None
+    recommended_limit: int
+    recommended_score_threshold: float
+
+
+class SearchWithIntentResponse(BaseModel):
+    """Response model for search with intent classification"""
+    query: str
+    intent: IntentClassificationResponse
+    results: List[SearchResponse]
+    total_results: int
+    search_time: float
 
 
 # ---------------------------------------------------------
@@ -828,6 +854,238 @@ def bulk_delete_documents(doc_ids: List[str] = Body(..., description="List of do
         duration = time.time() - start_time
         logger.error(
             f"Bulk delete failed - Duration: {duration:.3f}s, Error: {str(e)}",
+            exc_info=True
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------
+# 1️⃣1️⃣ CLASSIFY QUERY INTENT
+# ---------------------------------------------------------
+@app.post("/intent/classify", response_model=IntentClassificationResponse)
+def classify_intent(query: str = Body(..., embed=True, description="Query to classify")):
+    """
+    Classify the intent of a user query.
+
+    Identifies the type of query and provides recommendations for search optimization:
+    - **Factual**: Who, what, when, where questions
+    - **How-to**: Instructions, tutorials, guides
+    - **Definition**: Explanations, definitions
+    - **Comparison**: Comparing options
+    - **Code/Technical**: Code examples, API docs
+    - **Summary**: Overview, highlights
+    - **Troubleshooting**: Error fixing, debugging
+    - **Recommendation**: Best practices, suggestions
+    - **Procedural**: Steps, workflows
+    - **Conceptual**: Why, theory, concepts
+
+    Returns intent classification with confidence scores and search recommendations.
+
+    Example request:
+    ```json
+    {
+        "query": "How to implement authentication in Python"
+    }
+    ```
+
+    Example response:
+    ```json
+    {
+        "query": "How to implement authentication in Python",
+        "primary_intent": "how_to",
+        "confidence": 0.85,
+        "secondary_intents": [
+            {"intent": "code_technical", "confidence": 0.45}
+        ],
+        "recommended_filters": {"contains_code": true},
+        "recommended_limit": 10,
+        "recommended_score_threshold": 0.5
+    }
+    ```
+    """
+    start_time = time.time()
+    logger.info(f"Intent classification request - Query: '{query[:50]}...'")
+
+    try:
+        classification = intent_classifier.classify(query)
+
+        duration = time.time() - start_time
+
+        response = IntentClassificationResponse(
+            query=query,
+            primary_intent=classification.primary_intent.value,
+            confidence=classification.confidence,
+            secondary_intents=[
+                {"intent": intent.value, "confidence": conf}
+                for intent, conf in classification.secondary_intents
+            ],
+            recommended_filters=classification.recommended_filters,
+            recommended_limit=classification.recommended_limit,
+            recommended_score_threshold=classification.recommended_score_threshold
+        )
+
+        logger.info(
+            f"Intent classified - Intent: {classification.primary_intent.value}, "
+            f"Confidence: {classification.confidence:.2f}, Duration: {duration:.3f}s"
+        )
+
+        return response
+
+    except Exception as e:
+        duration = time.time() - start_time
+        logger.error(
+            f"Intent classification failed - Duration: {duration:.3f}s, Error: {str(e)}",
+            exc_info=True
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------
+# 1️⃣2️⃣ SMART SEARCH (with Intent Classification)
+# ---------------------------------------------------------
+@app.post("/search/smart", response_model=SearchWithIntentResponse)
+def smart_search(
+    query: str = Body(..., embed=True, description="Search query"),
+    use_intent_filters: bool = Body(True, description="Apply intent-based filters"),
+    use_intent_limits: bool = Body(True, description="Apply intent-based limits"),
+    override_filters: Optional[Dict[str, Any]] = Body(None, description="Manual filter overrides")
+):
+    """
+    Smart search with automatic intent classification and optimization.
+
+    This endpoint:
+    1. Classifies the query intent
+    2. Applies intent-specific search strategies
+    3. Returns results optimized for the query type
+
+    **Benefits:**
+    - Better relevance for different query types
+    - Automatic filter selection
+    - Optimized result limits
+    - Intent-aware scoring thresholds
+
+    **Intent-Specific Strategies:**
+    - **Summary queries** → Search document summaries first
+    - **Code queries** → Filter for code-heavy chunks
+    - **Troubleshooting** → Cast wider net, lower threshold
+    - **Definition queries** → Prefer early chunks, higher threshold
+    - **Comparison** → Return more results for multiple perspectives
+
+    Example request:
+    ```json
+    {
+        "query": "Show me code examples for authentication",
+        "use_intent_filters": true,
+        "use_intent_limits": true
+    }
+    ```
+
+    Example response:
+    ```json
+    {
+        "query": "Show me code examples for authentication",
+        "intent": {
+            "primary_intent": "code_technical",
+            "confidence": 0.82,
+            "recommended_filters": {"contains_code": true}
+        },
+        "results": [
+            {"id": "...", "score": 0.89, "text": "...", "metadata": {...}}
+        ],
+        "total_results": 8,
+        "search_time": 0.234
+    }
+    ```
+    """
+    start_time = time.time()
+    logger.info(f"Smart search request - Query: '{query[:50]}...', Use filters: {use_intent_filters}")
+
+    try:
+        # Step 1: Classify intent
+        classification = intent_classifier.classify(query)
+
+        logger.info(
+            f"Intent detected: {classification.primary_intent.value} "
+            f"(confidence: {classification.confidence:.2f})"
+        )
+
+        # Step 2: Build search parameters based on intent
+        filters = {}
+        limit = 10
+        score_threshold = 0.5
+
+        if use_intent_filters and classification.recommended_filters:
+            filters.update(classification.recommended_filters)
+            logger.debug(f"Applied intent filters: {filters}")
+
+        if use_intent_limits:
+            limit = classification.recommended_limit
+            score_threshold = classification.recommended_score_threshold
+            logger.debug(f"Applied intent limits: limit={limit}, threshold={score_threshold}")
+
+        # Apply manual overrides
+        if override_filters:
+            filters.update(override_filters)
+            logger.debug(f"Applied override filters: {override_filters}")
+
+        # Step 3: Execute search
+        if filters:
+            results = service.search(
+                query=query,
+                limit=limit,
+                filters=filters,
+                score_threshold=score_threshold
+            )
+        else:
+            results = service.search(
+                query=query,
+                limit=limit,
+                score_threshold=score_threshold
+            )
+
+        # Step 4: Format response
+        formatted_results = [
+            {
+                "id": str(r.get("payload", {}).get("chunk_id")),
+                "score": r.get("score"),
+                "text": r.get("payload", {}).get("text"),
+                "metadata": r.get("payload", {}),
+            }
+            for r in results
+        ]
+
+        duration = time.time() - start_time
+
+        response = SearchWithIntentResponse(
+            query=query,
+            intent=IntentClassificationResponse(
+                query=query,
+                primary_intent=classification.primary_intent.value,
+                confidence=classification.confidence,
+                secondary_intents=[
+                    {"intent": intent.value, "confidence": conf}
+                    for intent, conf in classification.secondary_intents
+                ],
+                recommended_filters=classification.recommended_filters,
+                recommended_limit=classification.recommended_limit,
+                recommended_score_threshold=classification.recommended_score_threshold
+            ),
+            results=formatted_results,
+            total_results=len(formatted_results),
+            search_time=duration
+        )
+
+        logger.info(
+            f"Smart search completed - Intent: {classification.primary_intent.value}, "
+            f"Results: {len(formatted_results)}, Duration: {duration:.3f}s"
+        )
+
+        return response
+
+    except Exception as e:
+        duration = time.time() - start_time
+        logger.error(
+            f"Smart search failed - Duration: {duration:.3f}s, Error: {str(e)}",
             exc_info=True
         )
         raise HTTPException(status_code=500, detail=str(e))
