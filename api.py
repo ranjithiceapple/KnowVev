@@ -6,6 +6,10 @@ import shutil
 import uuid
 import os
 import time
+from dotenv import load_dotenv
+
+# Load environment variables from .env file BEFORE initializing logger
+load_dotenv()
 
 from document_to_vector_service import (
     DocumentToVectorService,
