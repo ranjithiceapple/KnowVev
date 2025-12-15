@@ -18,6 +18,7 @@ from document_to_vector_service import (
 from logger_config import get_logger
 from list_documents_and_embeddings import DocumentLister
 from query_intent_classifier import QueryIntentClassifier, QueryIntent
+from query_analyzer import EnhancedQueryAnalyzer
 
 # Initialize logger
 logger = get_logger(__name__)
@@ -54,6 +55,11 @@ logger.info("DocumentLister initialized successfully")
 logger.info("Initializing QueryIntentClassifier")
 intent_classifier = QueryIntentClassifier()
 logger.info("QueryIntentClassifier initialized successfully")
+
+# Initialize Enhanced Query Analyzer
+logger.info("Initializing EnhancedQueryAnalyzer")
+query_analyzer = EnhancedQueryAnalyzer()
+logger.info("EnhancedQueryAnalyzer initialized successfully")
 
 # ---------------------------------------------------------
 # FASTAPI APP
@@ -1086,6 +1092,207 @@ def smart_search(
         duration = time.time() - start_time
         logger.error(
             f"Smart search failed - Duration: {duration:.3f}s, Error: {str(e)}",
+            exc_info=True
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------
+# 1️⃣3️⃣ ADVANCED SEARCH (with Enhanced Analysis & Fallback)
+# ---------------------------------------------------------
+@app.post("/search/advanced")
+def advanced_search(
+    query: str = Body(..., embed=True, description="Search query"),
+    min_results: int = Body(1, description="Minimum results before fallback"),
+    max_results: int = Body(20, description="Maximum results to return")
+):
+    """
+    Advanced search with enhanced query analysis and automatic fallback strategies.
+
+    **Key Features:**
+    - Enhanced scope detection (document vs section level)
+    - Specificity analysis (broad vs specific)
+    - Automatic summary routing
+    - Fallback strategies when no results found
+    - Post-filtering to exclude summaries for specific queries
+
+    **Handles Edge Cases:**
+    - "what is covered in document" → Summary (with fallback to sections)
+    - "git staging area explanation" → Sections only (excludes summary)
+    - "git working directory and staging area" → Sections (multiple topics)
+    - "overview of git" → Summary first (with fallback)
+
+    **Search Strategies:**
+    1. **summary_first**: Search summaries first, fallback to sections if needed
+    2. **section_only**: Search sections only, exclude summaries
+    3. **hybrid**: Search all chunks, rank by relevance
+    4. **summary_only**: Only return document summaries
+
+    Example request:
+    ```json
+    {
+        "query": "what is covered in document",
+        "min_results": 1,
+        "max_results": 10
+    }
+    ```
+
+    Example response:
+    ```json
+    {
+        "query": "what is covered in document",
+        "analysis": {
+            "scope": "document_level",
+            "specificity": "very_broad",
+            "strategy": "summary_first",
+            "confidence": 0.85
+        },
+        "results": [...],
+        "total_results": 3,
+        "search_time": 0.123,
+        "fallback_used": false,
+        "summary_excluded": false
+    }
+    ```
+    """
+    start_time = time.time()
+    logger.info(f"Advanced search request - Query: '{query[:50]}...'")
+
+    try:
+        # Step 1: Analyze query
+        analysis = query_analyzer.analyze(query)
+
+        logger.info(
+            f"Query analyzed - Scope: {analysis.scope.value}, "
+            f"Specificity: {analysis.specificity.value}, "
+            f"Strategy: {analysis.search_strategy}"
+        )
+
+        # Step 2: Execute search based on strategy
+        results = []
+        fallback_used = False
+        summary_excluded_count = 0
+
+        if analysis.search_strategy == 'summary_first':
+            # Try summary first
+            logger.debug("Executing summary-first search...")
+            if analysis.recommended_filters:
+                results = service.search(
+                    query=query,
+                    limit=max_results,
+                    filters=analysis.recommended_filters,
+                    score_threshold=0.5
+                )
+            else:
+                results = service.search(query=query, limit=max_results, score_threshold=0.5)
+
+            # Fallback to sections if not enough results
+            if len(results) < min_results and analysis.fallback_strategy:
+                logger.info(f"Insufficient results ({len(results)}), using fallback strategy")
+                fallback_results = service.search(query=query, limit=max_results, score_threshold=0.4)
+
+                # Filter out summaries from fallback
+                fallback_results = [
+                    r for r in fallback_results
+                    if r.get('payload', {}).get('section_title') != '[DOCUMENT SUMMARY]'
+                ]
+
+                results.extend(fallback_results)
+                fallback_used = True
+
+        elif analysis.search_strategy == 'section_only':
+            # Search all, then exclude summaries
+            logger.debug("Executing section-only search...")
+            all_results = service.search(query=query, limit=max_results * 2, score_threshold=0.4)
+
+            # Post-filter: exclude summary chunks
+            results = [
+                r for r in all_results
+                if r.get('payload', {}).get('section_title') != '[DOCUMENT SUMMARY]'
+            ]
+
+            summary_excluded_count = len(all_results) - len(results)
+            results = results[:max_results]
+
+            logger.debug(f"Excluded {summary_excluded_count} summary chunks")
+
+        elif analysis.search_strategy == 'hybrid':
+            # Search all chunks, let relevance decide
+            logger.debug("Executing hybrid search...")
+            results = service.search(query=query, limit=max_results, score_threshold=0.45)
+
+            # If specificity is high and summaries appear, consider excluding
+            if analysis.specificity_score > 0.7:
+                non_summary_results = [
+                    r for r in results
+                    if r.get('payload', {}).get('section_title') != '[DOCUMENT SUMMARY]'
+                ]
+
+                # Only use non-summary if we have enough
+                if len(non_summary_results) >= min_results:
+                    summary_excluded_count = len(results) - len(non_summary_results)
+                    results = non_summary_results
+                    logger.debug(f"Hybrid: Excluded {summary_excluded_count} summaries due to high specificity")
+
+        else:  # 'summary_only'
+            logger.debug("Executing summary-only search...")
+            results = service.search(
+                query=query,
+                limit=max_results,
+                filters={"section_title": "[DOCUMENT SUMMARY]"},
+                score_threshold=0.5
+            )
+
+            # Fallback if no summaries found
+            if len(results) == 0:
+                logger.info("No summary results, falling back to sections")
+                results = service.search(query=query, limit=max_results, score_threshold=0.4)
+                fallback_used = True
+
+        # Step 3: Format results
+        formatted_results = [
+            {
+                "id": str(r.get("payload", {}).get("chunk_id")),
+                "score": r.get("score"),
+                "text": r.get("payload", {}).get("text"),
+                "metadata": r.get("payload", {}),
+                "is_summary": r.get("payload", {}).get("section_title") == "[DOCUMENT SUMMARY]"
+            }
+            for r in results[:max_results]
+        ]
+
+        duration = time.time() - start_time
+
+        response = {
+            "query": query,
+            "analysis": {
+                "scope": analysis.scope.value,
+                "specificity": analysis.specificity.value,
+                "strategy": analysis.search_strategy,
+                "confidence": analysis.confidence,
+                "should_exclude_summary": analysis.should_exclude_summary,
+                "summary_only": analysis.summary_only
+            },
+            "results": formatted_results,
+            "total_results": len(formatted_results),
+            "search_time": duration,
+            "fallback_used": fallback_used,
+            "summary_excluded": summary_excluded_count > 0,
+            "summary_excluded_count": summary_excluded_count
+        }
+
+        logger.info(
+            f"Advanced search completed - Strategy: {analysis.search_strategy}, "
+            f"Results: {len(formatted_results)}, Fallback: {fallback_used}, "
+            f"Summaries excluded: {summary_excluded_count}, Duration: {duration:.3f}s"
+        )
+
+        return response
+
+    except Exception as e:
+        duration = time.time() - start_time
+        logger.error(
+            f"Advanced search failed - Duration: {duration:.3f}s, Error: {str(e)}",
             exc_info=True
         )
         raise HTTPException(status_code=500, detail=str(e))
