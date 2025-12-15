@@ -210,14 +210,15 @@ def search_documents(
         logger.debug(f"Search returned {len(results)} results")
 
         formatted = [
-            SearchResponse(
-                id=str(r.payload.get("chunk_id")),
-                score=r.score,
-                text=r.payload.get("text", ""),
-                metadata=r.payload
-            )
+            {
+                "id": str(r.get("payload", {}).get("chunk_id")),
+                "score": r.get("score"),
+                "text": r.get("payload", {}).get("text"),
+                "metadata": r.get("payload", {}),
+            }
             for r in results
         ]
+
 
         duration = time.time() - start_time
         logger.info(
