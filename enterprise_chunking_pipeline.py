@@ -433,30 +433,40 @@ class EnterpriseChunkingPipeline:
         logger.info(f"Document length: {len(text)} characters, {len(extraction_result.pages)} pages")
 
         # Step 1: Page-level chunking with mapping
+        logger.debug(f"Chunking: Starting Step 1 - Page-level chunking")
         step_start = time.time()
         page_chunks = self._chunk_by_pages(text, extraction_result)
         step_duration = time.time() - step_start
         logger.info(f"Step 1: Created {len(page_chunks)} page-level chunks in {step_duration:.2f}s")
+        logger.debug(f"Chunking: Page chunks size range: {min((len(c['text']) for c in page_chunks), default=0)} - {max((len(c['text']) for c in page_chunks), default=0)} chars")
 
         # Step 2: Section-aware chunking
+        logger.debug(f"Chunking: Starting Step 2 - Section-aware chunking")
         step_start = time.time()
         section_chunks = self._chunk_by_sections(page_chunks, extraction_result)
         step_duration = time.time() - step_start
         logger.info(f"Step 2: Created {len(section_chunks)} section-aware chunks in {step_duration:.2f}s")
+        logger.debug(f"Chunking: Section chunks created from {len(page_chunks)} page chunks")
 
         # Step 3: Apply size constraints and split large chunks
+        logger.debug(f"Chunking: Starting Step 3 - Applying size constraints (max: {self.config.max_chunk_size})")
         step_start = time.time()
         sized_chunks = self._apply_size_constraints(section_chunks)
         step_duration = time.time() - step_start
+        split_count = len(sized_chunks) - len(section_chunks)
         logger.info(f"Step 3: Applied size constraints, now {len(sized_chunks)} chunks in {step_duration:.2f}s")
+        if split_count > 0:
+            logger.debug(f"Chunking: Split {split_count} large chunks to meet size constraints")
 
         # Step 4: Apply semantic windowing (overlap)
+        logger.debug(f"Chunking: Starting Step 4 - Semantic windowing (overlap: {self.config.overlap_size if self.config.enable_overlap else 0})")
         step_start = time.time()
         overlapped_chunks = self._apply_semantic_windowing(sized_chunks)
         step_duration = time.time() - step_start
         logger.info(f"Step 4: Applied semantic windowing in {step_duration:.2f}s")
 
         # Step 5: Build comprehensive metadata
+        logger.debug(f"Chunking: Starting Step 5 - Building chunk metadata")
         step_start = time.time()
         final_chunks = self._build_chunk_metadata(
             overlapped_chunks,
@@ -465,6 +475,17 @@ class EnterpriseChunkingPipeline:
         )
         step_duration = time.time() - step_start
         logger.info(f"Step 5: Built metadata for {len(final_chunks)} final chunks in {step_duration:.2f}s")
+
+        # Log chunk statistics
+        if final_chunks:
+            avg_size = sum(c.chunk_char_len for c in final_chunks) / len(final_chunks)
+            logger.debug(
+                f"Chunking: Final statistics - "
+                f"Chunks: {len(final_chunks)}, "
+                f"Avg size: {avg_size:.0f} chars, "
+                f"Min: {min(c.chunk_char_len for c in final_chunks)}, "
+                f"Max: {max(c.chunk_char_len for c in final_chunks)}"
+            )
 
         total_duration = time.time() - start_time
         logger.info(
@@ -479,14 +500,14 @@ class EnterpriseChunkingPipeline:
         Step 1: Page-level chunking.
         Preserves page boundaries and mapping.
         """
-        logger.debug("Starting page-level chunking")
+        logger.debug("Chunking: Starting page-level chunking")
         chunks = []
         page_boundaries = self.boundary_detector.find_page_boundaries(text)
-        logger.debug(f"Found {len(page_boundaries)} page boundaries")
+        logger.debug(f"Chunking: Found {len(page_boundaries)} page boundaries")
 
         if not page_boundaries:
             # No page markers found - treat as single page
-            logger.warning("No page markers found, treating as single page")
+            logger.warning("Chunking: No page markers found, treating as single page")
             chunks.append({
                 'text': text,
                 'page_start': 1,
@@ -514,6 +535,8 @@ class EnterpriseChunkingPipeline:
                     None
                 )
 
+                logger.debug(f"Chunking: Page {page_num} - {len(page_text)} chars")
+
                 chunks.append({
                     'text': page_text,
                     'page_start': page_num,
@@ -521,6 +544,7 @@ class EnterpriseChunkingPipeline:
                     'original_page': original_page
                 })
 
+        logger.debug(f"Chunking: Page-level chunking complete - {len(chunks)} chunks created")
         return chunks
 
     def _chunk_by_sections(self, page_chunks: List[Dict], extraction_result) -> List[Dict]:

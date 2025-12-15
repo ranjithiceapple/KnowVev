@@ -582,6 +582,7 @@ class MetadataAwareNormalizer:
         Returns:
             PageNormalizationResult
         """
+        logger.debug(f"Normalization: Starting page {page_meta.page_number}")
         text = page_meta.text
         original_char_count = len(text)
         original_word_count = len(text.split())
@@ -590,6 +591,7 @@ class MetadataAwareNormalizer:
         removed_page_numbers = []
 
         # Step 1: Protect special elements
+        logger.debug(f"Normalization: Page {page_meta.page_number} - Step 1: Protecting special elements")
         protect_config = {
             'code_blocks': self.config.protect_code_blocks,
             'tables': self.config.protect_tables,
@@ -606,10 +608,12 @@ class MetadataAwareNormalizer:
 
         if protected_elements:
             changes_applied.append(f"Protected {len(protected_elements)} elements")
+            logger.debug(f"Normalization: Page {page_meta.page_number} - Protected {len(protected_elements)} elements")
 
         # NEW: Detect and handle multi-column layout
         if self.config.detect_multi_column:
             if self.column_detector.detect_columns(text):
+                logger.debug(f"Normalization: Page {page_meta.page_number} - Multi-column layout detected")
                 text = self.column_detector.split_columns(text)
                 changes_applied.append("Converted multi-column layout")
 
@@ -617,10 +621,12 @@ class MetadataAwareNormalizer:
         if self.config.preserve_hierarchy:
             hierarchy = self.hierarchy_preserver.extract_hierarchy(text)
             if hierarchy:
+                logger.debug(f"Normalization: Page {page_meta.page_number} - Preserving hierarchy ({len(hierarchy)} levels)")
                 text = self.hierarchy_preserver.add_hierarchy_markers(text)
                 changes_applied.append(f"Preserved hierarchy ({len(hierarchy)} levels)")
 
         # Step 2: Structural normalizations
+        logger.debug(f"Normalization: Page {page_meta.page_number} - Step 2: Structural normalizations")
         if self.config.normalize_line_breaks:
             text = self._normalize_line_breaks(text)
             changes_applied.append("Normalized line breaks")
@@ -630,16 +636,19 @@ class MetadataAwareNormalizer:
             changes_applied.append("Removed hyphen line breaks")
 
         # Step 3: Metadata-aware noise removal
+        logger.debug(f"Normalization: Page {page_meta.page_number} - Step 3: Metadata-aware noise removal")
         if self.config.remove_urls and page_meta.urls:
             text, removed = self._remove_urls_from_metadata(text, page_meta.urls)
             removed_urls.extend(removed)
             if removed:
+                logger.debug(f"Normalization: Page {page_meta.page_number} - Removed {len(removed)} URLs")
                 changes_applied.append(f"Removed {len(removed)} URLs")
 
         if self.config.remove_page_numbers:
             text, removed = self._remove_page_numbers_for_page(text, page_meta.page_number)
             removed_page_numbers.extend(removed)
             if removed:
+                logger.debug(f"Normalization: Page {page_meta.page_number} - Removed page number")
                 changes_applied.append(f"Removed page number")
 
         if self.config.remove_headers_footers:
@@ -647,6 +656,7 @@ class MetadataAwareNormalizer:
             changes_applied.append("Removed headers/footers")
 
         # Step 4: OCR corrections (conservative)
+        logger.debug(f"Normalization: Page {page_meta.page_number} - Step 4: OCR corrections")
         if self.config.fix_ligatures:
             text = self._fix_ligatures(text)
             changes_applied.append("Fixed ligatures")
@@ -656,6 +666,7 @@ class MetadataAwareNormalizer:
             changes_applied.append("Applied OCR corrections")
 
         # Step 5: Semantic normalizations (improved)
+        logger.debug(f"Normalization: Page {page_meta.page_number} - Step 5: Semantic normalizations")
         if self.config.merge_hyphenated_words:
             text = self._merge_hyphenated_words(text)
             changes_applied.append("Merged hyphenated words")
@@ -669,6 +680,7 @@ class MetadataAwareNormalizer:
             changes_applied.append("Normalized bullet points")
 
         # Step 6: Final cleanup
+        logger.debug(f"Normalization: Page {page_meta.page_number} - Step 6: Final cleanup")
         if self.config.collapse_whitespace:
             text = self._collapse_whitespace(text)
             changes_applied.append("Collapsed whitespace")
@@ -682,6 +694,7 @@ class MetadataAwareNormalizer:
             changes_applied.append("Unicode normalized")
 
         # Step 7: Restore protected elements
+        logger.debug(f"Normalization: Page {page_meta.page_number} - Step 7: Restoring protected elements")
         text = self.protection.restore_text(text)
 
         # Step 8: Final cleanup
@@ -708,6 +721,14 @@ class MetadataAwareNormalizer:
             removed_page_numbers=removed_page_numbers,
             protected_elements=protected_elements,
             changes_applied=changes_applied
+        )
+
+        char_reduction = original_char_count - len(text)
+        reduction_pct = (char_reduction / original_char_count * 100) if original_char_count > 0 else 0
+        logger.debug(
+            f"Normalization: Page {page_meta.page_number} complete - "
+            f"Chars: {original_char_count} → {len(text)} ({reduction_pct:.1f}% reduction), "
+            f"Changes: {', '.join(changes_applied[:5])}{'...' if len(changes_applied) > 5 else ''}"
         )
 
         return result

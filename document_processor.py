@@ -134,35 +134,44 @@ class TextPatternDetector:
     
     def extract_urls(self, text: str) -> List[str]:
         """Extract all URLs from text."""
-        return list(set(self.url_pattern.findall(text)))
+        urls = list(set(self.url_pattern.findall(text)))
+        logger.debug(f"Pattern Detection: Found {len(urls)} unique URLs")
+        return urls
     
     def extract_emails(self, text: str) -> List[str]:
         """Extract all email addresses from text."""
-        return list(set(self.email_pattern.findall(text)))
+        emails = list(set(self.email_pattern.findall(text)))
+        logger.debug(f"Pattern Detection: Found {len(emails)} unique email addresses")
+        return emails
     
     def extract_headings(self, text: str) -> List[str]:
         """Extract potential headings from text."""
         headings = []
         lines = text.split('\n')
-        
+
         for line in lines:
             line = line.strip()
             if not line or len(line) < 5:
                 continue
-                
+
             # Check against heading patterns
             for pattern in self.heading_patterns:
                 if pattern.match(line):
                     headings.append(line)
+                    logger.debug(f"Pattern Detection: Detected heading: '{line[:50]}...'")
                     break
-        
-        return list(set(headings))
+
+        unique_headings = list(set(headings))
+        logger.debug(f"Pattern Detection: Found {len(unique_headings)} unique headings")
+        return unique_headings
     
     def detect_toc(self, text: str) -> bool:
         """Detect if text contains Table of Contents."""
-        for pattern in self.toc_patterns:
+        for i, pattern in enumerate(self.toc_patterns):
             if pattern.search(text):
+                logger.debug(f"Pattern Detection: TOC detected (pattern {i+1}/{len(self.toc_patterns)})")
                 return True
+        logger.debug("Pattern Detection: No TOC detected")
         return False
 
 
@@ -332,37 +341,49 @@ def _extract_from_pdf_with_metadata(
         toc_pages = []
         
         for page_num in range(len(doc)):
-            logger.debug(f"Extracting page {page_num + 1}/{len(doc)} with metadata")
+            logger.debug(f"PDF Extraction: Processing page {page_num + 1}/{len(doc)}")
             page = doc[page_num]
             page_text = page.get_text()
-            
+
+            char_count = len(page_text)
+            word_count = len(page_text.split())
+            logger.debug(f"PDF Extraction: Page {page_num + 1} - {char_count} chars, {word_count} words")
+
             # Extract metadata for this page
             urls = detector.extract_urls(page_text)
             emails = detector.extract_emails(page_text)
             headings = detector.extract_headings(page_text)
             has_toc = detector.detect_toc(page_text)
-            
+
             if has_toc:
                 toc_pages.append(page_num + 1)
-            
+                logger.debug(f"PDF Extraction: Page {page_num + 1} contains Table of Contents")
+
+            if urls:
+                logger.debug(f"PDF Extraction: Page {page_num + 1} - Found URLs: {urls[:3]}{'...' if len(urls) > 3 else ''}")
+            if emails:
+                logger.debug(f"PDF Extraction: Page {page_num + 1} - Found emails: {emails[:3]}{'...' if len(emails) > 3 else ''}")
+            if headings:
+                logger.debug(f"PDF Extraction: Page {page_num + 1} - Found {len(headings)} headings")
+
             # Update global collections
             all_urls.update(urls)
             all_emails.update(emails)
             all_headings.update(headings)
-            
+
             # Create page metadata
             page_meta = PageMetadata(
                 page_number=page_num + 1,
                 text=page_text,
-                char_count=len(page_text),
-                word_count=len(page_text.split()),
+                char_count=char_count,
+                word_count=word_count,
                 urls=urls,
                 emails=emails,
                 headings=headings,
                 has_toc=has_toc,
                 sections=[]  # PDF pages don't have section breaks within a page
             )
-            
+
             pages_metadata.append(page_meta)
             all_text_parts.append(page_text)
         
@@ -391,8 +412,9 @@ def _extract_from_pdf_with_metadata(
         )
         
         logger.debug(
-            f"PDF extraction complete: {len(pages_metadata)} pages, "
-            f"{len(all_urls)} URLs, {len(all_headings)} headings"
+            f"PDF Extraction Complete: {len(pages_metadata)} pages, "
+            f"{len(all_urls)} URLs, {len(all_emails)} emails, {len(all_headings)} headings, "
+            f"TOC pages: {toc_pages if toc_pages else 'None'}"
         )
         
         return ExtractionResult(
