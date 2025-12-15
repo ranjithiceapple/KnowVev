@@ -22,6 +22,7 @@ from metadata_aware_normalizer import normalize_with_metadata, NormalizationConf
 from enterprise_chunking_pipeline import chunk_with_normalization, ChunkingConfig
 from embedding_preparation import prepare_for_embedding
 from qdrant_storage import QdrantStorage, QdrantConfig, setup_qdrant_collection
+from document_summarizer import DocumentSummarizer
 
 logger = get_logger(__name__)
 
@@ -66,6 +67,11 @@ class ServiceConfig:
     deduplicate_chunks: bool = True
     aggressive_text_cleaning: bool = False
 
+    # Document summary settings
+    generate_document_summary: bool = True
+    summary_max_length: int = 2000
+    summary_method: str = "hybrid"  # 'extractive', 'abstractive', 'hybrid'
+
     # Pipeline version
     version: str = "1.0"
 
@@ -83,11 +89,14 @@ class ProcessingResult:
     unique_chunks: int = 0
     duplicates_removed: int = 0
     vectors_stored: int = 0
+    has_summary: bool = False
+    summary_length: int = 0
 
     # Processing time
     extraction_time: float = 0.0
     normalization_time: float = 0.0
     chunking_time: float = 0.0
+    summary_time: float = 0.0
     embedding_time: float = 0.0
     storage_time: float = 0.0
     total_time: float = 0.0
@@ -108,11 +117,14 @@ class ProcessingResult:
                 'unique_chunks': self.unique_chunks,
                 'duplicates_removed': self.duplicates_removed,
                 'vectors_stored': self.vectors_stored,
+                'has_summary': self.has_summary,
+                'summary_length': self.summary_length,
             },
             'timing': {
                 'extraction_time': f"{self.extraction_time:.2f}s",
                 'normalization_time': f"{self.normalization_time:.2f}s",
                 'chunking_time': f"{self.chunking_time:.2f}s",
+                'summary_time': f"{self.summary_time:.2f}s",
                 'embedding_time': f"{self.embedding_time:.2f}s",
                 'storage_time': f"{self.storage_time:.2f}s",
                 'total_time': f"{self.total_time:.2f}s",
@@ -313,6 +325,46 @@ class DocumentToVectorService:
             result.chunking_time = time.time() - stage_start
 
             logger.info(f"[{doc_id}] ✅ Created {result.chunks_created} chunks in {result.chunking_time:.2f}s")
+
+            # ================================================================
+            # STAGE 3.5: GENERATE DOCUMENT SUMMARY (Virtual Chunk)
+            # ================================================================
+            if self.config.generate_document_summary:
+                logger.info(f"[{doc_id}] Stage 3.5/5: Generating document summary...")
+                stage_start = time.time()
+
+                summarizer = DocumentSummarizer(
+                    max_summary_length=self.config.summary_max_length,
+                    method=self.config.summary_method
+                )
+
+                # Generate summary
+                document_summary = summarizer.generate_summary(
+                    chunks=chunks,
+                    extraction_result=extraction_result,
+                    doc_id=doc_id,
+                    file_name=file_name
+                )
+
+                # Create virtual summary chunk
+                summary_chunk = summarizer.create_summary_chunk(document_summary)
+
+                # Insert summary chunk at the beginning
+                chunks = [summary_chunk] + chunks
+
+                # Update result statistics
+                result.summary_time = time.time() - stage_start
+                result.has_summary = True
+                result.summary_length = document_summary.summary_length
+
+                logger.info(
+                    f"[{doc_id}] ✅ Generated document summary in {result.summary_time:.2f}s "
+                    f"({document_summary.summary_length} chars, {document_summary.compression_ratio:.2%} compression)"
+                )
+                logger.info(f"[{doc_id}]    Title: {document_summary.document_title}")
+                logger.info(f"[{doc_id}]    Sections: {len(document_summary.main_sections)}")
+            else:
+                logger.info(f"[{doc_id}] Document summary generation disabled")
 
             # ================================================================
             # STAGE 4: PREPARE FOR EMBEDDING
