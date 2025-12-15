@@ -480,6 +480,29 @@ class DocumentToVectorService:
 
         return results
 
+    def filter_by_metadata(
+        self,
+        filters: Dict,
+        limit: int = 100,
+        offset: int = 0
+    ) -> List[Dict]:
+        """
+        Filter documents by metadata only (no vector search).
+
+        Args:
+            filters: Metadata filters to apply
+            limit: Maximum number of results
+            offset: Pagination offset
+
+        Returns:
+            List of filtered results
+        """
+        return self.storage.filter_by_metadata(
+            filters=filters,
+            limit=limit,
+            offset=offset
+        )
+
     def get_collection_stats(self) -> Dict:
         """Get statistics about the collection."""
         return self.storage.collection_manager.collection_info()

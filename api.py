@@ -1,7 +1,7 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Query
+from fastapi import FastAPI, File, UploadFile, HTTPException, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Optional, List
+from pydantic import BaseModel, Field
+from typing import Optional, List, Dict, Any, Union
 import shutil
 import uuid
 import os
@@ -100,6 +100,36 @@ class SearchResponse(BaseModel):
     score: float
     text: str
     metadata: dict
+
+
+class FilterSearchRequest(BaseModel):
+    """Request model for filtered search"""
+    query: str = Field(..., description="Search query text")
+    filters: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Metadata filters to apply",
+        examples=[{
+            "doc_id": "document-123",
+            "page_start": {"gte": 5, "lte": 10},
+            "contains_code": True
+        }]
+    )
+    limit: int = Field(default=10, ge=1, le=100, description="Maximum number of results")
+    score_threshold: Optional[float] = Field(default=None, description="Minimum score threshold")
+
+
+class MetadataFilterRequest(BaseModel):
+    """Request model for pure metadata filtering (no vector search)"""
+    filters: Dict[str, Any] = Field(
+        ...,
+        description="Metadata filters to apply",
+        examples=[{
+            "doc_id": "document-123",
+            "contains_tables": True
+        }]
+    )
+    limit: int = Field(default=100, ge=1, le=1000, description="Maximum number of results")
+    offset: int = Field(default=0, ge=0, description="Pagination offset")
 
 
 # ---------------------------------------------------------
@@ -243,7 +273,129 @@ def search_documents(
 
 
 # ---------------------------------------------------------
-# 3️⃣ COLLECTION STATS
+# 3️⃣ FILTERED SEMANTIC SEARCH
+# ---------------------------------------------------------
+@app.post("/search/filtered", response_model=List[SearchResponse])
+def filtered_search(request: FilterSearchRequest):
+    """
+    Semantic search with metadata filtering.
+
+    Combines vector similarity search with metadata filters for precise results.
+
+    Example filters:
+    - By document: {"doc_id": "document-123"}
+    - By page range: {"page_start": {"gte": 5, "lte": 10}}
+    - By content type: {"contains_code": True, "contains_tables": False}
+    - By section: {"section_title": "Introduction"}
+    - Combined: {"doc_id": "doc-123", "page_start": {"gte": 1}, "contains_code": True}
+    """
+    start_time = time.time()
+    logger.info(
+        f"Filtered search request - Query: '{request.query[:50]}', "
+        f"Filters: {request.filters}, Limit: {request.limit}"
+    )
+
+    try:
+        results = service.search(
+            query=request.query,
+            limit=request.limit,
+            filters=request.filters,
+            score_threshold=request.score_threshold
+        )
+
+        formatted = [
+            {
+                "id": str(r.get("payload", {}).get("chunk_id")),
+                "score": r.get("score"),
+                "text": r.get("payload", {}).get("text"),
+                "metadata": r.get("payload", {}),
+            }
+            for r in results
+        ]
+
+        duration = time.time() - start_time
+        logger.info(
+            f"Filtered search completed - Query: '{request.query[:50]}', "
+            f"Results: {len(formatted)}, Duration: {duration:.3f}s"
+        )
+
+        return formatted
+
+    except Exception as e:
+        duration = time.time() - start_time
+        logger.error(
+            f"Filtered search failed - Query: '{request.query[:50]}', "
+            f"Duration: {duration:.3f}s, Error: {str(e)}",
+            exc_info=True
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------
+# 4️⃣ METADATA-ONLY FILTERING (No Vector Search)
+# ---------------------------------------------------------
+@app.post("/filter")
+def filter_by_metadata(request: MetadataFilterRequest):
+    """
+    Filter documents by metadata only (no semantic search).
+
+    Useful for:
+    - Finding all chunks from a specific document
+    - Finding all chunks with tables or code
+    - Filtering by page ranges
+    - Browsing document structure
+
+    Example filters:
+    - All tables: {"contains_tables": True}
+    - Document pages: {"doc_id": "doc-123", "page_start": {"gte": 10, "lte": 20}}
+    - Code blocks: {"contains_code": True}
+    - Specific section: {"section_title": "Chapter 1"}
+    """
+    start_time = time.time()
+    logger.info(
+        f"Metadata filter request - Filters: {request.filters}, "
+        f"Limit: {request.limit}, Offset: {request.offset}"
+    )
+
+    try:
+        results = service.filter_by_metadata(
+            filters=request.filters,
+            limit=request.limit,
+            offset=request.offset
+        )
+
+        formatted = [
+            {
+                "id": str(r.get("payload", {}).get("chunk_id")),
+                "text": r.get("payload", {}).get("text"),
+                "metadata": r.get("payload", {}),
+            }
+            for r in results
+        ]
+
+        duration = time.time() - start_time
+        logger.info(
+            f"Metadata filter completed - Results: {len(formatted)}, Duration: {duration:.3f}s"
+        )
+
+        return {
+            "results": formatted,
+            "count": len(formatted),
+            "limit": request.limit,
+            "offset": request.offset
+        }
+
+    except Exception as e:
+        duration = time.time() - start_time
+        logger.error(
+            f"Metadata filter failed - Duration: {duration:.3f}s, Error: {str(e)}",
+            exc_info=True
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------
+# 5️⃣ COLLECTION STATS
 # ---------------------------------------------------------
 @app.get("/stats")
 def get_stats():
