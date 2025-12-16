@@ -55,7 +55,9 @@ class ChunkMetadata:
     # Section hierarchy (breadcrumb navigation)
     section_title: Optional[str] = None  # Clean section name (primary field)
     section_title_raw: Optional[str] = None  # Raw section name as appears in document
-    heading_path: List[str] = field(default_factory=list)  # e.g., ["Chapter 1", "Section 1.1", "Subsection 1.1.1"]
+    heading_path: List[str] = field(default_factory=list)  # Full hierarchy: ["Chapter 1", "Section 1.1", "Subsection 1.1.1"]
+    heading_level: Optional[int] = None  # Heading level: 1=H1, 2=H2, 3=H3, 4=H4, 5=H5, 6=H6
+    parent_section: Optional[str] = None  # Direct parent section name
 
     # Chunk positioning
     chunk_index: int = 0  # 0-based index
@@ -129,31 +131,50 @@ class BoundaryDetector:
     """
 
     def __init__(self):
-        # Section markers - patterns now return (pattern, extractor_function, level)
-        # Level 1: Major headings
+        # Section markers - patterns return (pattern, extractor_function, level)
+        # LEVELS: 1 (H1), 2 (H2), 3 (H3), 4 (H4), 5 (H5), 6 (H6)
         self.section_patterns = [
-            # ALL CAPS HEADINGS (preserves exact text)
-            (re.compile(r'^([A-Z][A-Z\s]{8,})$', re.MULTILINE), lambda m: m.group(1).strip(), 1),
+            # MARKDOWN HEADINGS (Most Common) - Proper hierarchy
+            (re.compile(r'^#\s+(.+)$', re.MULTILINE),
+             lambda m: m.group(1).strip(), 1),  # H1
+            (re.compile(r'^##\s+(.+)$', re.MULTILINE),
+             lambda m: m.group(1).strip(), 2),  # H2
+            (re.compile(r'^###\s+(.+)$', re.MULTILINE),
+             lambda m: m.group(1).strip(), 3),  # H3
+            (re.compile(r'^####\s+(.+)$', re.MULTILINE),
+             lambda m: m.group(1).strip(), 4),  # H4
+            (re.compile(r'^#####\s+(.+)$', re.MULTILINE),
+             lambda m: m.group(1).strip(), 5),  # H5
+            (re.compile(r'^######\s+(.+)$', re.MULTILINE),
+             lambda m: m.group(1).strip(), 6),  # H6
 
-            # Chapter/Section/Part markers (preserves with number)
-            (re.compile(r'^((?:Chapter|Section|Part)\s+\d+[:.]\s*.*)$', re.MULTILINE | re.IGNORECASE),
-             lambda m: m.group(1).strip(), 1),
-
-            # Numbered headings: "1. Title" or "1.1 Title" (preserves number and title)
-            (re.compile(r'^(\d+(?:\.\d+)*[\.)]\s+.+)$', re.MULTILINE),
-             lambda m: m.group(1).strip(), 2),
-
-            # Markdown headings (extracts text WITHOUT # symbols)
-            (re.compile(r'^#{1,3}\s+(.+)$', re.MULTILINE),
-             lambda m: m.group(1).strip(), 1),  # H1-H3
-            (re.compile(r'^#{4,6}\s+(.+)$', re.MULTILINE),
-             lambda m: m.group(1).strip(), 2),  # H4-H6
-
-            # Underlined headings (text followed by === or ---)
+            # UNDERLINED HEADINGS (reStructuredText style)
             (re.compile(r'^(.+)\n[=]{3,}$', re.MULTILINE),
-             lambda m: m.group(1).strip(), 1),
+             lambda m: m.group(1).strip(), 1),  # H1 (= underline)
             (re.compile(r'^(.+)\n[-]{3,}$', re.MULTILINE),
-             lambda m: m.group(1).strip(), 2),
+             lambda m: m.group(1).strip(), 2),  # H2 (- underline)
+
+            # CHAPTER/SECTION/PART MARKERS
+            (re.compile(r'^((?:Chapter|CHAPTER)\s+\d+[:.]\s*.*)$', re.MULTILINE),
+             lambda m: m.group(1).strip(), 1),  # Chapter = H1
+            (re.compile(r'^((?:Section|SECTION)\s+\d+(?:\.\d+)?[:.]\s*.*)$', re.MULTILINE),
+             lambda m: m.group(1).strip(), 2),  # Section = H2
+            (re.compile(r'^((?:Part|PART)\s+\d+[:.]\s*.*)$', re.MULTILINE),
+             lambda m: m.group(1).strip(), 1),  # Part = H1
+
+            # NUMBERED HEADINGS (Detect level by dots)
+            (re.compile(r'^(\d+[\.)]\s+.+)$', re.MULTILINE),  # "1. Title"
+             lambda m: m.group(1).strip(), 1),  # Level 1
+            (re.compile(r'^(\d+\.\d+[\.)]\s+.+)$', re.MULTILINE),  # "1.1 Title"
+             lambda m: m.group(1).strip(), 2),  # Level 2
+            (re.compile(r'^(\d+\.\d+\.\d+[\.)]\s+.+)$', re.MULTILINE),  # "1.1.1 Title"
+             lambda m: m.group(1).strip(), 3),  # Level 3
+            (re.compile(r'^(\d+\.\d+\.\d+\.\d+[\.)]\s+.+)$', re.MULTILINE),  # "1.1.1.1 Title"
+             lambda m: m.group(1).strip(), 4),  # Level 4
+
+            # ALL CAPS HEADINGS (Conservative - treat as H1)
+            (re.compile(r'^([A-Z][A-Z\s]{10,})$', re.MULTILINE),
+             lambda m: m.group(1).strip(), 1),  # Must be 11+ chars of ALL CAPS
         ]
 
         # Page markers
@@ -608,13 +629,21 @@ class EnterpriseChunkingPipeline:
                 })
                 continue
 
-            # Split by sections
-            heading_stack = []  # Track heading hierarchy
+            # Split by sections with PROPER HIERARCHY VALIDATION
+            heading_stack = []  # Stack of (title, level) tuples
 
             for i, (pos, title, level) in enumerate(section_boundaries):
-                # Update heading stack based on level
+                # VALIDATE HIERARCHY: Maintain proper parent-child relationships
+                # Remove all headings at same or deeper level
                 heading_stack = [h for h in heading_stack if h[1] < level]
+
+                # PARENT SECTION INHERITANCE
+                # Add current heading to stack
                 heading_stack.append((title, level))
+
+                # Build heading path from root to current
+                # This preserves the full hierarchy: H1 > H2 > H3 > Current
+                heading_path = [h[0] for h in heading_stack]
 
                 # Get text until next section (or end)
                 if i < len(section_boundaries) - 1:
@@ -626,18 +655,26 @@ class EnterpriseChunkingPipeline:
                 section_text = section_text.strip()
 
                 if section_text:
-                    # Store BOTH clean and raw section names
-                    # section_title: clean version for search/display
-                    # section_title_raw: exactly as appears in document
+                    # Determine boundary type based on level
+                    if level == 1:
+                        boundary = BoundaryType.SECTION.value
+                    elif level == 2:
+                        boundary = BoundaryType.SUBSECTION.value
+                    else:
+                        boundary = BoundaryType.SUBSECTION.value
+
+                    # Store BOTH clean and raw section names with VALIDATED hierarchy
                     section_chunks.append({
                         'text': section_text,
                         'page_start': page_start,
                         'page_end': page_end,
-                        'section_title': title,  # Clean heading text (no # or <<<>>>)
-                        'section_title_raw': title,  # Raw is same as clean now (patterns extract clean text)
-                        'heading_path': [h[0] for h in heading_stack],
+                        'section_title': title,  # Current section name
+                        'section_title_raw': title,  # Exact as in document
+                        'heading_path': heading_path,  # Full hierarchy path with parent inheritance
+                        'heading_level': level,  # Store level for validation
+                        'parent_section': heading_stack[-2][0] if len(heading_stack) > 1 else None,  # Direct parent
                         'original_page': original_page,
-                        'boundary_type': BoundaryType.SECTION.value if level == 1 else BoundaryType.SUBSECTION.value
+                        'boundary_type': boundary
                     })
 
         return section_chunks
@@ -824,7 +861,7 @@ class EnterpriseChunkingPipeline:
             contains_code = '```' in text or 'def ' in text or 'class ' in text
             contains_bullets = bool(re.search(r'^[\s]*[•·∙●○◦▪▫■□\*\-\+]\s+', text, re.MULTILINE))
 
-            # Create metadata
+            # Create metadata with VALIDATED HIERARCHY
             metadata = ChunkMetadata(
                 doc_id=doc_id,
                 file_name=extraction_result.metadata.file_name,
@@ -833,7 +870,9 @@ class EnterpriseChunkingPipeline:
                 page_number_end=chunk['page_end'],
                 section_title=chunk.get('section_title'),  # Clean section name
                 section_title_raw=chunk.get('section_title_raw'),  # Raw section name from document
-                heading_path=chunk.get('heading_path', []),
+                heading_path=chunk.get('heading_path', []),  # Full hierarchy with parent inheritance
+                heading_level=chunk.get('heading_level'),  # Validated heading level (1-6)
+                parent_section=chunk.get('parent_section'),  # Direct parent section
                 chunk_index=i,
                 total_chunks=total_chunks,
                 chunk_char_len=len(text),
