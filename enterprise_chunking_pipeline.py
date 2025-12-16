@@ -212,25 +212,152 @@ class BoundaryDetector:
             boundaries.append((match.start(), page_num))
         return boundaries
 
+    def _is_valid_section_heading(self, title: str, match_text: str, surrounding_context: str = "") -> bool:
+        """
+        STRICT VALIDATION: Determine if extracted text is a true section heading.
+
+        POSITIVE RULES (must pass ALL):
+        1. Heading must be on isolated line (not inline with other text)
+        2. Length must be reasonable (3-100 characters)
+        3. Must look like a section title, not a question or exercise
+        4. Must not be preceded/followed by text on same line
+
+        NEGATIVE RULES (must pass NONE):
+        1. Questions (ends with ?)
+        2. Exercise/Practice prompts
+        3. Fill-in-the-blank or multiple choice
+        4. Code snippets or technical syntax
+        5. List items or bullet points
+        6. URLs or file paths
+        7. Numbers-only or dates
+        8. All lowercase (likely not a heading)
+
+        Args:
+            title: Extracted heading text (clean)
+            match_text: Original matched text (with formatting)
+            surrounding_context: Text around the match for isolation check
+
+        Returns:
+            True if valid section heading, False otherwise
+        """
+        # NEGATIVE RULE 1: Questions are NOT section headings
+        if title.strip().endswith('?'):
+            return False
+        if title.lower().startswith(('what is ', 'what are ', 'how to ', 'how do ', 'why ', 'when ', 'where ')):
+            return False
+
+        # NEGATIVE RULE 2: Exercises/Practice prompts are NOT headings
+        exercise_keywords = [
+            'exercise', 'practice', 'try it', 'hands-on', 'lab', 'assignment',
+            'homework', 'quiz', 'test yourself', 'challenge', 'activity'
+        ]
+        title_lower = title.lower()
+        if any(keyword in title_lower for keyword in exercise_keywords):
+            return False
+
+        # NEGATIVE RULE 3: Fill-in-blank, multiple choice NOT headings
+        if '____' in title or '___' in title:
+            return False
+        if re.search(r'\b[A-D]\)|^\([A-D]\)', title):  # (A) or A)
+            return False
+
+        # NEGATIVE RULE 4: Code snippets NOT headings
+        code_indicators = ['()', '{}', '[]', '=>', '->', '::']
+        if any(ind in title for ind in code_indicators):
+            return False
+        if re.search(r'[a-z]+\([^)]*\)', title):  # function() pattern
+            return False
+
+        # NEGATIVE RULE 5: List items NOT headings (unless properly numbered)
+        if title.startswith(('• ', '- ', '* ', '+ ', '· ')):
+            return False
+
+        # NEGATIVE RULE 6: URLs, file paths, emails NOT headings
+        if re.search(r'https?://', title) or '@' in title:
+            return False
+        if re.search(r'[/\\].+[/\\]', title):  # /path/to/file
+            return False
+
+        # NEGATIVE RULE 7: Numbers-only or dates NOT headings
+        if re.match(r'^\d+$', title.strip()):  # Just numbers
+            return False
+        if re.match(r'^\d{1,2}[/-]\d{1,2}[/-]\d{2,4}$', title):  # Date
+            return False
+
+        # NEGATIVE RULE 8: All lowercase likely NOT a heading
+        # Exception: markdown headings and numbered headings are OK
+        if title.islower() and not match_text.startswith('#') and not re.match(r'^\d+\.', title):
+            return False
+
+        # NEGATIVE RULE 9: Too many special characters
+        special_char_count = sum(1 for c in title if c in '!@#$%^&*()+={}[]|\\:;"<>,')
+        if special_char_count > 3:
+            return False
+
+        # NEGATIVE RULE 10: Starts with coordinating conjunction (likely continuation)
+        if title.lower().startswith(('and ', 'but ', 'or ', 'so ', 'yet ', 'for ', 'nor ')):
+            return False
+
+        # POSITIVE RULE 1: Length must be reasonable
+        if len(title) < 3 or len(title) > 100:
+            return False
+
+        # POSITIVE RULE 2: Heading must be isolated (not inline)
+        # Check if there's text before or after on the same line
+        if surrounding_context:
+            lines = surrounding_context.split('\n')
+            for line in lines:
+                if match_text in line:
+                    # Remove the match itself
+                    remaining = line.replace(match_text, '')
+                    # If there's substantial text remaining, it's not isolated
+                    if remaining.strip() and len(remaining.strip()) > 5:
+                        return False
+                    break
+
+        # POSITIVE RULE 3: Must start with capital letter or number
+        if not (title[0].isupper() or title[0].isdigit()):
+            return False
+
+        # POSITIVE RULE 4: Reasonable word count (not too many words = paragraph)
+        word_count = len(title.split())
+        if word_count > 15:  # Headings shouldn't be this long
+            return False
+        if word_count == 1 and len(title) < 4 and not title.isdigit():  # Single short word unlikely
+            return False
+
+        return True
+
     def find_section_boundaries(self, text: str) -> List[Tuple[int, str, int]]:
         """
-        Find section boundaries and extract clean heading text.
+        Find section boundaries with STRICT VALIDATION.
+        Only returns TRUE section headings, not questions, exercises, or inline text.
 
         Returns:
             List of (position, section_title, level) tuples
             - position: character position in text
-            - section_title: CLEAN heading text (no formatting markers)
-            - level: heading level (1=major, 2=minor)
+            - section_title: CLEAN heading text (validated)
+            - level: heading level (1-6)
         """
         boundaries = []
 
         for pattern, extractor, level in self.section_patterns:
             for match in pattern.finditer(text):
-                # Use the extractor function to get clean title text
+                # Extract clean title
                 title = extractor(match)
+                match_text = match.group(0)
 
-                # Skip empty or very short titles
-                if not title or len(title) < 2:
+                # Get surrounding context for isolation check
+                start = max(0, match.start() - 100)
+                end = min(len(text), match.end() + 100)
+                context = text[start:end]
+
+                # STRICT VALIDATION
+                if not self._is_valid_section_heading(title, match_text, context):
+                    continue
+
+                # Additional validation
+                if not title or len(title) < 3 or len(title) > 100:
                     continue
 
                 # Never store placeholders or synthetic markers
@@ -241,7 +368,16 @@ class BoundaryDetector:
 
         # Sort by position
         boundaries.sort(key=lambda x: x[0])
-        return boundaries
+
+        # Remove duplicates (same position, different pattern matches)
+        seen_positions = set()
+        unique_boundaries = []
+        for pos, title, level in boundaries:
+            if pos not in seen_positions:
+                seen_positions.add(pos)
+                unique_boundaries.append((pos, title, level))
+
+        return unique_boundaries
 
     def find_paragraph_boundaries(self, text: str) -> List[int]:
         """
