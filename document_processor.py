@@ -290,30 +290,129 @@ def extract_text_from_document(
         raise Exception(f"Failed to extract text from document: {str(e)}") from e
 
 
+def _enrich_text_with_headings(text: str, headings: List[str]) -> str:
+    """
+    Enrich text by ensuring headings are properly formatted as markdown headers.
+
+    BUG FIX (BUG 1 & BUG 4): This function addresses the issue where headings were extracted
+    and stored in metadata but never passed to the downstream pipeline (normalization,
+    chunking, embeddings). By converting detected headings to markdown format,
+    we ensure they are:
+    1. Recognized by the BoundaryDetector in the chunking pipeline (uses ^# pattern)
+    2. Preserved during normalization
+    3. Visible to RAG systems for better context understanding
+
+    Args:
+        text: Original page text
+        headings: List of detected headings
+
+    Returns:
+        Text with headings properly formatted as markdown headers
+    """
+    if not headings:
+        return text
+
+    enriched_text = text
+
+    # For each heading, ensure it's formatted as a markdown header if present in text
+    for heading in headings:
+        # Check if heading exists in text
+        if heading not in enriched_text:
+            continue
+
+        # Check if it's already formatted as markdown header
+        markdown_variants = [
+            f"# {heading}",
+            f"## {heading}",
+            f"### {heading}",
+            f"#### {heading}",
+            f"##### {heading}",
+            f"###### {heading}"
+        ]
+
+        # If already markdown formatted, skip
+        is_already_markdown = any(variant in enriched_text for variant in markdown_variants)
+        if is_already_markdown:
+            continue
+
+        # BUG FIX (BUG 4): Use regex for robust heading detection and replacement
+        # This ensures headings are on their own line and properly formatted
+        # Detect heading level from content
+        level = _detect_heading_level_simple(heading)
+        markdown_prefix = "#" * level + " "
+
+        # Escape special regex characters in heading
+        escaped_heading = re.escape(heading)
+
+        # Pattern 1: Heading on its own line (with optional surrounding whitespace)
+        # This matches: \n  Heading  \n or start-of-text Heading \n
+        pattern1 = re.compile(
+            rf'(^|\n)[ \t]*{escaped_heading}[ \t]*($|\n)',
+            re.MULTILINE
+        )
+
+        # Replace with markdown formatted version
+        # Ensure it's on its own line with proper formatting
+        replacement = rf'\1{markdown_prefix}{heading}\2'
+        enriched_text = pattern1.sub(replacement, enriched_text, count=1)
+
+    return enriched_text
+
+
+def _detect_heading_level_simple(heading: str) -> int:
+    """
+    Detect heading level from heading text.
+    Used by _enrich_text_with_headings for simple level detection.
+
+    Returns heading level 1-6 based on content patterns.
+    """
+    # Chapter/Part = H1
+    if re.match(r'^(?:Chapter|Part|CHAPTER|PART)\s+\d+', heading, re.IGNORECASE):
+        return 1
+
+    # Section X = H2
+    if re.match(r'^(?:Section|SECTION)\s+\d+', heading, re.IGNORECASE):
+        return 2
+
+    # Numbered headings (detect level by dots)
+    numbered_match = re.match(r'^(\d+(?:\.\d+)*)[.)\s]', heading)
+    if numbered_match:
+        number = numbered_match.group(1)
+        level = len(number.split('.'))
+        return min(level, 6)  # Max level is 6
+
+    # ALL CAPS = H1 (if long enough)
+    if heading.isupper() and len(heading) > 10:
+        return 1
+
+    # Title Case or sentence case = H2 (default for unclear cases)
+    return 2
+
+
 def _extract_from_pdf(file_path: Union[Path, io.BytesIO]) -> str:
     """Extract text from PDF using PyMuPDF (simple mode)."""
     try:
         logger.debug("Starting PDF text extraction")
-        
+
         if isinstance(file_path, io.BytesIO):
             doc = fitz.open(stream=file_path, filetype="pdf")
         else:
             doc = fitz.open(file_path)
-        
+
         text_parts = []
-        
+
         for page_num in range(len(doc)):
             logger.debug(f"Extracting text from page {page_num + 1}/{len(doc)}")
             page = doc[page_num]
             text_parts.append(page.get_text())
-        
+
         doc.close()
-        
+
         full_text = "\n\n".join(text_parts)
         logger.debug(f"PDF extraction complete: {len(doc)} pages processed")
-        
+
         return full_text
-        
+
     except Exception as e:
         logger.error(f"PDF extraction failed: {str(e)}", exc_info=True)
         raise Exception(f"Failed to extract text from PDF: {str(e)}") from e
@@ -338,6 +437,8 @@ def _extract_from_pdf_with_metadata(
         all_urls = set()
         all_emails = set()
         all_headings = set()
+        # BUG FIX: Track headings in order to preserve document hierarchy
+        ordered_headings = []  # Preserve order for document-level sections
         toc_pages = []
         
         for page_num in range(len(doc)):
@@ -370,11 +471,19 @@ def _extract_from_pdf_with_metadata(
             all_urls.update(urls)
             all_emails.update(emails)
             all_headings.update(headings)
+            # BUG FIX: Preserve heading order for document-level sections
+            for heading in headings:
+                if heading not in ordered_headings:  # Avoid duplicates while preserving order
+                    ordered_headings.append(heading)
+
+            # BUG FIX: Enrich page text with properly formatted headings
+            # This ensures headings flow through to normalization, chunking, and embeddings
+            enriched_page_text = _enrich_text_with_headings(page_text, headings)
 
             # Create page metadata
             page_meta = PageMetadata(
                 page_number=page_num + 1,
-                text=page_text,
+                text=page_text,  # Keep original text in metadata
                 char_count=char_count,
                 word_count=word_count,
                 urls=urls,
@@ -385,14 +494,15 @@ def _extract_from_pdf_with_metadata(
             )
 
             pages_metadata.append(page_meta)
-            all_text_parts.append(page_text)
+            all_text_parts.append(enriched_page_text)  # Use enriched text for downstream processing
         
         doc.close()
         
         # Combine all text
         full_text = "\n\n".join(all_text_parts)
         
-        # Create document metadata
+        # BUG FIX: Build document-level sections from ordered headings
+        # This provides global section structure and continuity across pages
         doc_metadata = DocumentMetadata(
             file_name=file_name,
             file_type='pdf',
@@ -406,14 +516,15 @@ def _extract_from_pdf_with_metadata(
             all_headings=list(all_headings),
             has_toc=len(toc_pages) > 0,
             toc_page_numbers=toc_pages,
-            sections=[],  # PDF doesn't have section breaks like DOCX
-            total_sections=0,
-            has_section_breaks=False
+            sections=ordered_headings,  # Document-level sections in order
+            total_sections=len(ordered_headings),
+            has_section_breaks=len(ordered_headings) > 0  # Has sections if headings exist
         )
         
         logger.debug(
             f"PDF Extraction Complete: {len(pages_metadata)} pages, "
             f"{len(all_urls)} URLs, {len(all_emails)} emails, {len(all_headings)} headings, "
+            f"{len(ordered_headings)} sections, "
             f"TOC pages: {toc_pages if toc_pages else 'None'}"
         )
         
@@ -569,10 +680,29 @@ def _extract_from_docx_with_metadata(
         headings = detector.extract_headings(full_text)
 
         # Combine detected headings with DOCX heading styles
-        all_headings = list(set(headings + section_titles))
+        # BUG FIX: Preserve order when combining headings
+        all_headings_ordered = []
+        seen_headings = set()
+        # First add section_titles (from DOCX styles) in order
+        for heading in section_titles:
+            if heading not in seen_headings:
+                all_headings_ordered.append(heading)
+                seen_headings.add(heading)
+        # Then add pattern-detected headings
+        for heading in headings:
+            if heading not in seen_headings:
+                all_headings_ordered.append(heading)
+                seen_headings.add(heading)
+
+        all_headings = all_headings_ordered
+
+        # BUG FIX: Enrich text with properly formatted headings
+        # This ensures headings flow through to normalization, chunking, and embeddings
+        full_text = _enrich_text_with_headings(full_text, all_headings)
 
         has_toc = detector.detect_toc(full_text)
 
+        # BUG FIX: Use all_headings (not just section_titles) for complete section hierarchy
         # Create single page metadata with section information
         page_meta = PageMetadata(
             page_number=1,
@@ -583,10 +713,11 @@ def _extract_from_docx_with_metadata(
             emails=emails,
             headings=all_headings,
             has_toc=has_toc,
-            sections=section_titles
+            sections=all_headings  # Use all headings, not just section_titles
         )
 
-        # Create document metadata with section information
+        # BUG FIX: Build document-level sections from all headings (styles + detected)
+        # This provides complete global section structure
         doc_metadata = DocumentMetadata(
             file_name=file_name,
             file_type='docx',
@@ -600,15 +731,15 @@ def _extract_from_docx_with_metadata(
             all_headings=all_headings,
             has_toc=has_toc,
             toc_page_numbers=[1] if has_toc else [],
-            sections=section_titles,
-            total_sections=max(len(sections), section_count + 1),
-            has_section_breaks=has_section_breaks
+            sections=all_headings,  # Use all headings for complete hierarchy
+            total_sections=len(all_headings),
+            has_section_breaks=has_section_breaks or len(all_headings) > 0
         )
 
         logger.debug(
             f"DOCX extraction complete: {len(doc.paragraphs)} paragraphs, "
             f"{len(doc.tables)} tables, {len(urls)} URLs, "
-            f"{doc_metadata.total_sections} sections, "
+            f"{len(all_headings)} headings, {doc_metadata.total_sections} sections, "
             f"{'with' if has_section_breaks else 'without'} section breaks"
         )
 
@@ -666,13 +797,19 @@ def _extract_from_txt_with_metadata(
                 text = f.read()
         
         detector = TextPatternDetector()
-        
+
         # Extract metadata
         urls = detector.extract_urls(text)
         emails = detector.extract_emails(text)
         headings = detector.extract_headings(text)
+
+        # BUG FIX: Enrich text with properly formatted headings
+        # This ensures headings flow through to normalization, chunking, and embeddings
+        text = _enrich_text_with_headings(text, headings)
+
         has_toc = detector.detect_toc(text)
         
+        # BUG FIX: Use headings as sections for document-level hierarchy
         # Create single page metadata
         page_meta = PageMetadata(
             page_number=1,
@@ -683,10 +820,11 @@ def _extract_from_txt_with_metadata(
             emails=emails,
             headings=headings,
             has_toc=has_toc,
-            sections=[]  # TXT files don't have explicit sections
+            sections=headings  # Use detected headings as sections
         )
 
-        # Create document metadata
+        # BUG FIX: Build document-level sections from headings
+        # This provides global section structure
         doc_metadata = DocumentMetadata(
             file_name=file_name,
             file_type='txt',
@@ -700,12 +838,15 @@ def _extract_from_txt_with_metadata(
             all_headings=headings,
             has_toc=has_toc,
             toc_page_numbers=[1] if has_toc else [],
-            sections=[],
-            total_sections=0,
-            has_section_breaks=False
+            sections=headings,  # Document-level sections from headings
+            total_sections=len(headings),
+            has_section_breaks=len(headings) > 0  # Has sections if headings exist
         )
         
-        logger.debug(f"TXT extraction complete: {len(urls)} URLs, {len(headings)} headings")
+        logger.debug(
+            f"TXT extraction complete: {len(urls)} URLs, {len(headings)} headings, "
+            f"{len(headings)} sections"
+        )
         
         return ExtractionResult(
             text=text,

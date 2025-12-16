@@ -450,6 +450,97 @@ class MetadataAwareNormalizer:
             'ﬅ': 'st', 'ﬆ': 'st', 'Æ': 'AE', 'æ': 'ae', 'Œ': 'OE', 'œ': 'oe'
         }
 
+    def _inject_hierarchy_from_metadata(self, text: str, headings: List[str]) -> str:
+        """
+        BUG FIX (BUG 3 & BUG 4): Inject hierarchy markers using metadata headings.
+
+        This ensures headings maintain their structural role after normalization,
+        allowing the chunker to detect section boundaries using ^# patterns.
+
+        Unlike the HierarchyPreserver which extracts hierarchy from text patterns,
+        this method uses the authoritative heading metadata from document extraction.
+
+        Args:
+            text: Normalized text after restoration
+            headings: List of headings from page metadata
+
+        Returns:
+            Text with hierarchy markers that chunker can recognize
+        """
+        if not headings:
+            return text
+
+        enriched_text = text
+
+        # For each heading in metadata, ensure it's properly marked in the text
+        for heading in headings:
+            if heading not in enriched_text:
+                continue
+
+            # Check if heading is already markdown formatted
+            markdown_variants = [
+                f"# {heading}",
+                f"## {heading}",
+                f"### {heading}",
+                f"#### {heading}",
+                f"##### {heading}",
+                f"###### {heading}"
+            ]
+
+            is_markdown = any(variant in enriched_text for variant in markdown_variants)
+            if is_markdown:
+                continue  # Already formatted, skip
+
+            # BUG FIX (BUG 4): Use regex for robust heading detection and replacement
+            # This ensures headings are on their own line at the START (^) as chunker expects
+            level = self._detect_heading_level(heading)
+            markdown_prefix = "#" * level + " "
+
+            # Escape special regex characters in heading
+            escaped_heading = re.escape(heading)
+
+            # Pattern: Heading on its own line (with optional surrounding whitespace)
+            # This matches: \n  Heading  \n or start-of-text Heading \n
+            pattern = re.compile(
+                rf'(^|\n)[ \t]*{escaped_heading}[ \t]*($|\n)',
+                re.MULTILINE
+            )
+
+            # Replace with markdown formatted version
+            # Ensures heading is at line start for chunker's ^# pattern matching
+            replacement = rf'\1{markdown_prefix}{heading}\2'
+            enriched_text = pattern.sub(replacement, enriched_text, count=1)
+
+        return enriched_text
+
+    def _detect_heading_level(self, heading: str) -> int:
+        """
+        Detect heading level from heading text.
+
+        Returns heading level 1-6 based on content patterns.
+        """
+        # Chapter/Part = H1
+        if re.match(r'^(?:Chapter|Part|CHAPTER|PART)\s+\d+', heading, re.IGNORECASE):
+            return 1
+
+        # Section X = H2
+        if re.match(r'^(?:Section|SECTION)\s+\d+', heading, re.IGNORECASE):
+            return 2
+
+        # Numbered headings (detect level by dots)
+        numbered_match = re.match(r'^(\d+(?:\.\d+)*)[.)\s]', heading)
+        if numbered_match:
+            number = numbered_match.group(1)
+            level = len(number.split('.'))
+            return min(level, 6)  # Max level is 6
+
+        # ALL CAPS = H1 (if long enough)
+        if heading.isupper() and len(heading) > 8:
+            return 1
+
+        # Title Case = H2 (default for unclear cases)
+        return 2
+
     def normalize_document(self, extraction_result) -> Tuple[str, List[PageNormalizationResult]]:
         """
         Normalize an entire document using metadata-aware processing.
@@ -709,6 +800,13 @@ class MetadataAwareNormalizer:
         # Step 7: Restore protected elements
         logger.debug(f"Normalization: Page {page_meta.page_number} - Step 7: Restoring protected elements")
         text = self.protection.restore_text(text)
+
+        # BUG FIX: Step 7.5: Inject hierarchy markers from metadata
+        # This ensures headings maintain their structural role and are recognizable to the chunker
+        if page_meta.headings and self.config.protect_headings:
+            logger.debug(f"Normalization: Page {page_meta.page_number} - Step 7.5: Injecting hierarchy from metadata ({len(page_meta.headings)} headings)")
+            text = self._inject_hierarchy_from_metadata(text, page_meta.headings)
+            changes_applied.append(f"Injected hierarchy for {len(page_meta.headings)} headings")
 
         # Step 8: Final cleanup
         text = text.strip()
