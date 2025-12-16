@@ -53,7 +53,8 @@ class ChunkMetadata:
     page_number_end: int
 
     # Section hierarchy (breadcrumb navigation)
-    section_title: Optional[str] = None
+    section_title: Optional[str] = None  # Clean section name (primary field)
+    section_title_raw: Optional[str] = None  # Raw section name as appears in document
     heading_path: List[str] = field(default_factory=list)  # e.g., ["Chapter 1", "Section 1.1", "Subsection 1.1.1"]
 
     # Chunk positioning
@@ -128,15 +129,31 @@ class BoundaryDetector:
     """
 
     def __init__(self):
-        # Section markers
+        # Section markers - patterns now return (pattern, extractor_function, level)
+        # Level 1: Major headings
         self.section_patterns = [
-            re.compile(r'^<<<HIERARCHY_L1>>>$', re.MULTILINE),
-            re.compile(r'^<<<HIERARCHY_L2>>>$', re.MULTILINE),
-            re.compile(r'^<<<HIERARCHY_L3>>>$', re.MULTILINE),
-            re.compile(r'^[A-Z][A-Z\s]{8,}$', re.MULTILINE),  # ALL CAPS
-            re.compile(r'^(?:Chapter|Section|Part)\s+\d+', re.MULTILINE | re.IGNORECASE),
-            re.compile(r'^\d+\.\s+[A-Z]', re.MULTILINE),  # 1. Title
-            re.compile(r'^#{1,6}\s+', re.MULTILINE),  # Markdown headings
+            # ALL CAPS HEADINGS (preserves exact text)
+            (re.compile(r'^([A-Z][A-Z\s]{8,})$', re.MULTILINE), lambda m: m.group(1).strip(), 1),
+
+            # Chapter/Section/Part markers (preserves with number)
+            (re.compile(r'^((?:Chapter|Section|Part)\s+\d+[:.]\s*.*)$', re.MULTILINE | re.IGNORECASE),
+             lambda m: m.group(1).strip(), 1),
+
+            # Numbered headings: "1. Title" or "1.1 Title" (preserves number and title)
+            (re.compile(r'^(\d+(?:\.\d+)*[\.)]\s+.+)$', re.MULTILINE),
+             lambda m: m.group(1).strip(), 2),
+
+            # Markdown headings (extracts text WITHOUT # symbols)
+            (re.compile(r'^#{1,3}\s+(.+)$', re.MULTILINE),
+             lambda m: m.group(1).strip(), 1),  # H1-H3
+            (re.compile(r'^#{4,6}\s+(.+)$', re.MULTILINE),
+             lambda m: m.group(1).strip(), 2),  # H4-H6
+
+            # Underlined headings (text followed by === or ---)
+            (re.compile(r'^(.+)\n[=]{3,}$', re.MULTILINE),
+             lambda m: m.group(1).strip(), 1),
+            (re.compile(r'^(.+)\n[-]{3,}$', re.MULTILINE),
+             lambda m: m.group(1).strip(), 2),
         ]
 
         # Page markers
@@ -176,16 +193,29 @@ class BoundaryDetector:
 
     def find_section_boundaries(self, text: str) -> List[Tuple[int, str, int]]:
         """
-        Find section boundaries.
+        Find section boundaries and extract clean heading text.
 
         Returns:
             List of (position, section_title, level) tuples
+            - position: character position in text
+            - section_title: CLEAN heading text (no formatting markers)
+            - level: heading level (1=major, 2=minor)
         """
         boundaries = []
 
-        for level, pattern in enumerate(self.section_patterns, start=1):
+        for pattern, extractor, level in self.section_patterns:
             for match in pattern.finditer(text):
-                title = match.group(0).strip()
+                # Use the extractor function to get clean title text
+                title = extractor(match)
+
+                # Skip empty or very short titles
+                if not title or len(title) < 2:
+                    continue
+
+                # Never store placeholders or synthetic markers
+                if title.startswith('<<<') or title.startswith('#'):
+                    continue
+
                 boundaries.append((match.start(), title, level))
 
         # Sort by position
@@ -551,6 +581,7 @@ class EnterpriseChunkingPipeline:
         """
         Step 2: Section-aware chunking.
         Splits on section boundaries while respecting page boundaries.
+        Preserves exact heading text from the original document.
         """
         section_chunks = []
 
@@ -564,12 +595,13 @@ class EnterpriseChunkingPipeline:
             section_boundaries = self.boundary_detector.find_section_boundaries(text)
 
             if not section_boundaries:
-                # No sections found - keep as single chunk
+                # No sections found - keep as single chunk without placeholder section name
                 section_chunks.append({
                     'text': text,
                     'page_start': page_start,
                     'page_end': page_end,
-                    'section_title': None,
+                    'section_title': None,  # No placeholder - leave as None
+                    'section_title_raw': None,
                     'heading_path': [],
                     'original_page': original_page,
                     'boundary_type': BoundaryType.PAGE.value
@@ -594,11 +626,15 @@ class EnterpriseChunkingPipeline:
                 section_text = section_text.strip()
 
                 if section_text:
+                    # Store BOTH clean and raw section names
+                    # section_title: clean version for search/display
+                    # section_title_raw: exactly as appears in document
                     section_chunks.append({
                         'text': section_text,
                         'page_start': page_start,
                         'page_end': page_end,
-                        'section_title': title,
+                        'section_title': title,  # Clean heading text (no # or <<<>>>)
+                        'section_title_raw': title,  # Raw is same as clean now (patterns extract clean text)
                         'heading_path': [h[0] for h in heading_stack],
                         'original_page': original_page,
                         'boundary_type': BoundaryType.SECTION.value if level == 1 else BoundaryType.SUBSECTION.value
@@ -795,7 +831,8 @@ class EnterpriseChunkingPipeline:
                 chunk_id=f"{doc_id}_chunk_{i:04d}",
                 page_number_start=chunk['page_start'],
                 page_number_end=chunk['page_end'],
-                section_title=chunk.get('section_title'),
+                section_title=chunk.get('section_title'),  # Clean section name
+                section_title_raw=chunk.get('section_title_raw'),  # Raw section name from document
                 heading_path=chunk.get('heading_path', []),
                 chunk_index=i,
                 total_chunks=total_chunks,
