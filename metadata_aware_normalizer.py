@@ -510,11 +510,16 @@ class MetadataAwareNormalizer:
         total_original_chars = sum(r.original_char_count for r in page_results)
         total_normalized_chars = len(full_normalized_text)
 
+        # Calculate reduction percentage safely
+        reduction_pct = 0.0
+        if total_original_chars > 0:
+            reduction_pct = ((total_original_chars - total_normalized_chars) / total_original_chars * 100)
+
         logger.info(
             f"Document normalization complete - File: {extraction_result.metadata.file_name}, "
             f"Pages: {len(page_results)}, "
             f"Chars: {total_original_chars} → {total_normalized_chars} "
-            f"({((total_original_chars - total_normalized_chars) / total_original_chars * 100):.1f}% reduction), "
+            f"({reduction_pct:.1f}% reduction), "
             f"Total duration: {total_duration:.2f}s"
         )
 
@@ -553,6 +558,14 @@ class MetadataAwareNormalizer:
         removed_count = len(pages) - len(filtered_pages)
         if removed_count > 0:
             logger.info(f"Filtered out {removed_count} page(s)")
+
+        # Safety check: Never filter out ALL pages
+        if len(filtered_pages) == 0 and len(pages) > 0:
+            logger.warning(
+                f"All {len(pages)} page(s) were filtered out! "
+                f"This is likely incorrect. Keeping all pages to prevent data loss."
+            )
+            return pages
 
         return filtered_pages
 
