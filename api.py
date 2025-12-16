@@ -19,23 +19,45 @@ from logger_config import get_logger
 from list_documents_and_embeddings import DocumentLister
 from query_intent_classifier import QueryIntentClassifier, QueryIntent
 from query_analyzer import EnhancedQueryAnalyzer
+from config import get_config
 
 # Initialize logger
 logger = get_logger(__name__)
 
 # ---------------------------------------------------------
-# Load config from environment (Docker passes variables)
+# Load config from environment
 # ---------------------------------------------------------
 logger.info("Loading configuration from environment variables")
-QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
-logger.info(f"Configuration loaded - QDRANT_URL: {QDRANT_URL}, EMBEDDING_MODEL: {EMBEDDING_MODEL}")
+config = get_config()
+logger.info(f"Configuration loaded - QDRANT_URL: {config.qdrant_url}, EMBEDDING_MODEL: {config.embedding_model}")
 
+# Create service config from loaded configuration
 service_config = ServiceConfig(
-    qdrant_url="http://localhost:6333",  # Your existing Qdrant
-    qdrant_collection="documents_services",        # Use existing or create new
-    embedding_model_name="all-MiniLM-L6-v2",
-    vector_size=384
+    qdrant_url=config.qdrant_url,
+    qdrant_collection=config.qdrant_collection,
+    qdrant_api_key=config.qdrant_api_key,
+    embedding_model_name=config.embedding_model,
+    vector_size=config.embedding_dimension,
+    # Processing settings
+    max_chunk_size=config.max_chunk_size,
+    target_chunk_size=config.target_chunk_size,
+    enable_overlap=config.enable_overlap,
+    overlap_size=config.overlap_size,
+    respect_page_boundaries=config.respect_page_boundaries,
+    keep_tables_intact=config.keep_tables_intact,
+    # Normalization settings
+    remove_toc_pages=config.remove_toc_pages,
+    protect_headings=config.protect_headings,
+    protect_tables=config.protect_tables,
+    protect_code_blocks=config.protect_code_blocks,
+    detect_multi_column=config.detect_multi_column,
+    # Processing
+    deduplicate_chunks=config.deduplicate_chunks,
+    aggressive_text_cleaning=config.aggressive_text_cleaning,
+    # Summary settings
+    generate_document_summary=config.generate_document_summary,
+    summary_max_length=config.summary_max_length,
+    summary_method=config.summary_method,
 )
 logger.info(f"Service config created - Collection: {service_config.qdrant_collection}, Vector size: {service_config.vector_size}")
 
@@ -70,14 +92,15 @@ logger.info("FastAPI application created successfully")
 
 # CORS
 logger.info("Configuring CORS middleware")
+cors_origins = config.cors_origins.split(",") if config.cors_origins != "*" else ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-logger.info("CORS middleware configured")
+logger.info(f"CORS middleware configured - Origins: {cors_origins}")
 
 
 # Request logging middleware
