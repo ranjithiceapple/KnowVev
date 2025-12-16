@@ -268,14 +268,6 @@ class BoundaryDetector:
         if re.search(r'[a-z]+\([^)]*\)', title):  # function() pattern
             return False
 
-        # NEGATIVE RULE 4B: Python comments are NOT headings
-        # If it starts with # but doesn't start with a digit, it's likely a code comment
-        # Valid headings like "1.2 Input/output" start with digits
-        if match_text.startswith('#') and not title[0].isdigit():
-            # Exception: If it's an all-caps heading that looks official
-            if not (title.isupper() and len(title) > 10):
-                return False
-
         # NEGATIVE RULE 5: List items NOT headings (unless properly numbered)
         if title.startswith(('• ', '- ', '* ', '+ ', '· ')):
             return False
