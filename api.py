@@ -240,12 +240,19 @@ def root():
 # 1️⃣ DOCUMENT INGESTION ENDPOINT
 # ---------------------------------------------------------
 @app.post("/process")
-async def process_document(file: UploadFile = File(...)):
+async def process_document(
+    file: UploadFile = File(...),
+    debug: bool = False
+):
     """
     Upload a document → Extract → Normalize → Chunk → Embed → Store in Qdrant
+
+    Args:
+        file: Document file to process
+        debug: If True, saves pipeline stage outputs to pipeline_debug/ folder
     """
     start_time = time.time()
-    logger.info(f"Document processing started - Filename: {file.filename}, Content-Type: {file.content_type}")
+    logger.info(f"Document processing started - Filename: {file.filename}, Content-Type: {file.content_type}, Debug mode: {debug}")
 
     try:
         # Temporary file path
@@ -258,6 +265,15 @@ async def process_document(file: UploadFile = File(...)):
             shutil.copyfileobj(file.file, buffer)
         file_size = os.path.getsize(temp_file_path)
         logger.info(f"File saved successfully - Size: {file_size} bytes")
+
+        # DEBUG MODE: Run pipeline inspector if debug=True
+        debug_files = None
+        if debug:
+            logger.info(f"Debug mode enabled - Running pipeline stage inspector")
+            from pipeline_stage_inspector import PipelineStageInspector
+            inspector = PipelineStageInspector(output_dir="pipeline_debug")
+            debug_files = inspector.inspect_pipeline(temp_file_path)
+            logger.info(f"Debug files created: {len(debug_files)} files in pipeline_debug/")
 
         # Process document using the full pipeline
         logger.info(f"Starting document processing pipeline for: {file.filename}")
@@ -288,7 +304,7 @@ async def process_document(file: UploadFile = File(...)):
             f"Total time: {duration:.2f}s"
         )
 
-        return {
+        response = {
             "message": "Document processed successfully",
             "doc_id": result.doc_id,
             "pages_extracted": result.pages_extracted,
@@ -297,6 +313,16 @@ async def process_document(file: UploadFile = File(...)):
             "vectors_stored": result.vectors_stored,
             "total_time": result.total_time
         }
+
+        # Add debug files to response if debug mode was enabled
+        if debug and debug_files:
+            response["debug"] = {
+                "enabled": True,
+                "output_dir": "pipeline_debug",
+                "files_created": debug_files
+            }
+
+        return response
 
     except HTTPException:
         raise
