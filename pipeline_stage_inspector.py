@@ -301,15 +301,15 @@ class PipelineStageInspector:
                 f.write(f"Page range: {chunk.page_number_start}-{chunk.page_number_end}\n")
                 f.write(f"Section title: {chunk.section_title or '(none)'}\n")
                 f.write(f"Heading path: {chunk.heading_path}\n")
-                f.write(f"Hierarchy level: {chunk.hierarchy_level}\n")
+                f.write(f"Heading level: {chunk.heading_level or '(none)'}\n")
                 f.write(f"Boundary type: {chunk.boundary_type}\n")
-                f.write(f"Char length: {chunk.char_length}\n")
-                f.write(f"Word count: {chunk.word_count}\n")
+                f.write(f"Char length: {chunk.chunk_char_len}\n")
+                f.write(f"Word count: {chunk.chunk_word_count}\n")
                 f.write(f"Has overlap: {chunk.has_overlap}\n")
                 f.write(f"Contains tables: {chunk.contains_tables}\n")
                 f.write(f"Contains code: {chunk.contains_code}\n")
                 f.write("\nTEXT:\n")
-                f.write(chunk.text)
+                f.write(chunk.normalized_text)
                 f.write("\n\n" + "=" * 80 + "\n\n")
 
             f.write("END OF CHUNKS\n")
@@ -320,6 +320,9 @@ class PipelineStageInspector:
         chunk_metadata = []
 
         for chunk in chunks:
+            # Build heading_path_str from heading_path if not available
+            heading_path_str = " > ".join(chunk.heading_path) if chunk.heading_path else ""
+
             chunk_metadata.append({
                 'chunk_id': chunk.chunk_id,
                 'chunk_index': chunk.chunk_index,
@@ -327,16 +330,16 @@ class PipelineStageInspector:
                 'page_end': chunk.page_number_end,
                 'section_title': chunk.section_title,
                 'heading_path': chunk.heading_path,
-                'heading_path_str': chunk.heading_path_str,
-                'hierarchy_level': chunk.hierarchy_level,
-                'char_length': chunk.char_length,
-                'word_count': chunk.word_count,
+                'heading_path_str': heading_path_str,
+                'heading_level': chunk.heading_level,
+                'char_length': chunk.chunk_char_len,
+                'word_count': chunk.chunk_word_count,
                 'boundary_type': chunk.boundary_type,
                 'has_overlap': chunk.has_overlap,
                 'contains_tables': chunk.contains_tables,
                 'contains_code': chunk.contains_code,
                 'contains_bullets': chunk.contains_bullets,
-                'text_preview': chunk.text[:200] + "..." if len(chunk.text) > 200 else chunk.text
+                'text_preview': chunk.normalized_text[:200] + "..." if len(chunk.normalized_text) > 200 else chunk.normalized_text
             })
 
         with open(filepath, 'w', encoding='utf-8') as f:
