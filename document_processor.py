@@ -117,11 +117,40 @@ class TextPatternDetector:
         )
         
         # Heading patterns (all caps, title case, numbered sections)
+        # EXPANDED: Added more patterns to catch various heading formats
         self.heading_patterns = [
-            re.compile(r'^[A-Z][A-Z\s]{5,}$', re.MULTILINE),  # ALL CAPS HEADINGS
-            re.compile(r'^(?:Chapter|Section|Part)\s+\d+[:\s]', re.MULTILINE | re.IGNORECASE),
-            re.compile(r'^\d+\.\s+[A-Z][a-zA-Z\s]{3,}$', re.MULTILINE),  # 1. Heading Text
-            re.compile(r'^\d+\.\d+\s+[A-Z][a-zA-Z\s]{3,}$', re.MULTILINE),  # 1.1 Heading Text
+            # Markdown headings (from enrichment or native markdown)
+            re.compile(r'^#{1,6}\s+.+$', re.MULTILINE),
+
+            # ALL CAPS HEADINGS (pure caps, 6+ chars)
+            re.compile(r'^[A-Z][A-Z\s]{5,}$', re.MULTILINE),
+
+            # ALL CAPS with # prefix (e.g., "# CONCEPTS IN PRACTICE")
+            re.compile(r'^#\s+[A-Z][A-Z\s]{5,}$', re.MULTILINE),
+
+            # Chapter/Section/Part markers
+            re.compile(r'^(?:Chapter|Section|Part|Appendix|Article)\s+\d+[:\s]', re.MULTILINE | re.IGNORECASE),
+
+            # Numbered headings: "1. Heading Text"
+            re.compile(r'^\d+\.\s+[A-Z][a-zA-Z\s]{3,}$', re.MULTILINE),
+
+            # Numbered headings: "1.1 Heading Text"
+            re.compile(r'^\d+\.\d+\s+[A-Z][a-zA-Z\s]{3,}$', re.MULTILINE),
+
+            # Numbered headings: "1.1.1 Heading Text"
+            re.compile(r'^\d+\.\d+\.\d+\s+[A-Z][a-zA-Z\s]{3,}$', re.MULTILINE),
+
+            # NEW: Number + symbol + text (e.g., "8 • Strings")
+            re.compile(r'^\d+\s+[•·●○▪▫■□\-]\s+[A-Z][a-zA-Z\s]{2,}$', re.MULTILINE),
+
+            # NEW: Table/Figure references (e.g., "Table 8.3", "Figure 2.1")
+            re.compile(r'^(?:Table|Figure|Listing|Example)\s+\d+(?:\.\d+)?', re.MULTILINE | re.IGNORECASE),
+
+            # NEW: Underlined headings (heading followed by ===== or -----)
+            re.compile(r'^.{5,}\n[=\-]{3,}$', re.MULTILINE),
+
+            # NEW: Bold-style markers (***Heading*** or **Heading**)
+            re.compile(r'^\*{2,3}[A-Z][a-zA-Z\s]{3,}\*{2,3}$', re.MULTILINE),
         ]
         
         # TOC patterns
