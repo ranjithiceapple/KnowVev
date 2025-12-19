@@ -110,6 +110,10 @@ class ChunkingConfig:
     respect_section_boundaries: bool = True  # Prefer splitting on sections
     respect_paragraph_boundaries: bool = True  # Prefer splitting on paragraphs
 
+    # Heading-aware chunking (NEW)
+    use_structured_headings: bool = True  # Use font/style-based heading detection from extraction
+    prefer_structured_over_regex: bool = True  # Prefer structured headings over regex patterns
+
     # Special element handling
     keep_tables_intact: bool = True
     keep_code_blocks_intact: bool = True
@@ -734,11 +738,88 @@ class EnterpriseChunkingPipeline:
         logger.debug(f"Chunking: Page-level chunking complete - {len(chunks)} chunks created")
         return chunks
 
+    def _find_section_boundaries_enhanced(
+        self,
+        text: str,
+        original_page
+    ) -> List[Tuple[int, str, int]]:
+        """
+        Find section boundaries using structured headings from extraction metadata.
+
+        This enhanced method uses the font/style analysis results from document extraction,
+        providing more accurate heading detection than regex patterns alone.
+
+        Args:
+            text: Page text to search in
+            original_page: PageMetadata object with headings_structured
+
+        Returns:
+            List of (position, title, level) tuples for section boundaries
+        """
+        # Check if structured heading usage is enabled
+        if not self.config.use_structured_headings:
+            return []
+
+        if not original_page or not hasattr(original_page, 'headings_structured'):
+            return []
+
+        structured_headings = original_page.headings_structured
+        if not structured_headings:
+            return []
+
+        logger.info(f"📍 Heading-aware chunking: Using {len(structured_headings)} structured headings for boundary detection")
+
+        boundaries = []
+
+        # For each structured heading, find its position in the text
+        for heading_info in structured_headings:
+            heading_text = heading_info['text']
+            level_str = heading_info['level']  # e.g., "H1", "H2", "H3"
+
+            # Extract numeric level
+            level = int(level_str[1]) if len(level_str) > 1 and level_str[1].isdigit() else 2
+
+            # Search for the heading in markdown format first (# Heading, ## Heading, etc.)
+            markdown_patterns = [
+                rf'^{"#" * level}\s+{re.escape(heading_text)}\s*$',  # Exact markdown
+                rf'^{"#" * level}\s+{re.escape(heading_text)}',  # Markdown at start
+            ]
+
+            position = None
+            for pattern in markdown_patterns:
+                match = re.search(pattern, text, re.MULTILINE)
+                if match:
+                    position = match.start()
+                    logger.debug(f"Found markdown heading '{heading_text}' at position {position}")
+                    break
+
+            # If not found in markdown format, search for plain text heading
+            if position is None:
+                # Try to find the heading as standalone line
+                pattern = rf'(^|\n)[ \t]*{re.escape(heading_text)}[ \t]*($|\n)'
+                match = re.search(pattern, text, re.MULTILINE)
+                if match:
+                    position = match.start()
+                    logger.debug(f"Found plain text heading '{heading_text}' at position {position}")
+
+            # Add to boundaries if found
+            if position is not None:
+                boundaries.append((position, heading_text, level))
+
+        # Sort by position (headings should appear in document order)
+        boundaries.sort(key=lambda x: x[0])
+
+        logger.debug(f"Enhanced boundary detection found {len(boundaries)} headings in text")
+        return boundaries
+
     def _chunk_by_sections(self, page_chunks: List[Dict], extraction_result) -> List[Dict]:
         """
-        Step 2: Section-aware chunking.
+        Step 2: Section-aware chunking (ENHANCED with structured headings).
         Splits on section boundaries while respecting page boundaries.
         Preserves exact heading text from the original document.
+
+        ENHANCEMENT: Uses structured headings from extraction metadata when available,
+        providing more accurate heading detection and level information.
         """
         section_chunks = []
 
@@ -748,8 +829,28 @@ class EnterpriseChunkingPipeline:
             page_end = page_chunk['page_end']
             original_page = page_chunk['original_page']
 
-            # Find section boundaries in this page
-            section_boundaries = self.boundary_detector.find_section_boundaries(text)
+            # ENHANCED: Try to use structured headings first (from font/style analysis)
+            section_boundaries = self._find_section_boundaries_enhanced(
+                text,
+                original_page
+            )
+
+            # Track which method was used for logging
+            used_structured = len(section_boundaries) > 0 if section_boundaries else False
+
+            # Fallback: Use regex-based detection if no structured headings available
+            if not section_boundaries and not self.config.prefer_structured_over_regex:
+                logger.debug(f"Page {page_start}: No structured headings, falling back to regex detection")
+                section_boundaries = self.boundary_detector.find_section_boundaries(text)
+            elif not section_boundaries:
+                logger.debug(f"Page {page_start}: No structured headings and prefer_structured_over_regex=True")
+                section_boundaries = self.boundary_detector.find_section_boundaries(text)
+
+            # Log which method was successful
+            if section_boundaries and used_structured:
+                logger.info(f"✅ Page {page_start}: Using {len(section_boundaries)} STRUCTURED headings (font-based)")
+            elif section_boundaries:
+                logger.debug(f"Page {page_start}: Using {len(section_boundaries)} regex-detected headings (fallback)")
 
             if not section_boundaries:
                 # No sections found - keep as single chunk without placeholder section name

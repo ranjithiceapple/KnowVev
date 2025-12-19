@@ -1,12 +1,13 @@
 import logging
 from pathlib import Path
-from typing import Union, Optional, List, Dict, Any
+from typing import Union, Optional, List, Dict, Any, Tuple
 import fitz  # PyMuPDF
 from docx import Document
 import io
 import re
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
+from collections import Counter
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -22,6 +23,7 @@ class PageMetadata:
     urls: List[str] = field(default_factory=list)
     emails: List[str] = field(default_factory=list)
     headings: List[str] = field(default_factory=list)
+    headings_structured: List[Dict[str, Any]] = field(default_factory=list)  # Headings with level info
     has_toc: bool = False
     sections: List[str] = field(default_factory=list)  # Section titles if present
 
@@ -204,6 +206,199 @@ class TextPatternDetector:
         return False
 
 
+def extract_unbiased_pdf_headings(pdf_doc: fitz.Document) -> List[Dict[str, Any]]:
+    """
+    Extract headings from PDF using font size analysis and visual inference.
+
+    This function uses a two-pass approach:
+    1. Pass 1: Collect all text lines with font metadata
+    2. Pass 2: Classify headings based on font size relative to body text
+
+    Args:
+        pdf_doc: Open PyMuPDF document object
+
+    Returns:
+        List of heading dictionaries with keys:
+            - page: Page number
+            - level: Heading level (H1, H2, H3)
+            - text: Heading text
+            - font_size: Font size in points
+            - bold: Whether text is bold
+    """
+    logger.debug("Starting unbiased PDF heading extraction")
+
+    lines = []
+
+    # Pass 1: Collect all text lines with metadata
+    for page_no, page in enumerate(pdf_doc, start=1):
+        page_dict = page.get_text("dict")
+
+        for block in page_dict["blocks"]:
+            if block["type"] != 0:  # Skip non-text blocks
+                continue
+
+            for line in block["lines"]:
+                text = "".join(span["text"] for span in line["spans"]).strip()
+                if not text:
+                    continue
+
+                sizes = [span["size"] for span in line["spans"]]
+                avg_size = sum(sizes) / len(sizes) if sizes else 0
+
+                fonts = {span["font"] for span in line["spans"]}
+                bold = any("Bold" in f for f in fonts)
+
+                lines.append({
+                    "page": page_no,
+                    "text": text,
+                    "size": avg_size,
+                    "bold": bold
+                })
+
+    if not lines:
+        logger.debug("No text lines found in PDF")
+        return []
+
+    # Determine body font size (most common size)
+    size_counts = Counter(round(l["size"], 1) for l in lines)
+    body_size = size_counts.most_common(1)[0][0] if size_counts else 12.0
+    logger.debug(f"Detected body font size: {body_size}pt")
+
+    headings = []
+
+    # Pass 2: Classify headings based on font size
+    for line in lines:
+        text = line["text"]
+        size = line["size"]
+        bold = line["bold"]
+
+        level = None
+
+        # H1 — very large text (1.6x body size)
+        if size >= body_size * 1.6:
+            level = "H1"
+
+        # H2 — moderately larger (1.3x body size)
+        elif size >= body_size * 1.3:
+            level = "H2"
+
+        # H3 — slightly larger OR bold isolated line (short text)
+        elif size > body_size and bold and len(text.split()) <= 10:
+            level = "H3"
+
+        if level:
+            headings.append({
+                "page": line["page"],
+                "level": level,
+                "text": text,
+                "font_size": round(size, 1),
+                "bold": bold
+            })
+
+    logger.debug(f"Extracted {len(headings)} headings from PDF using font analysis")
+    return headings
+
+
+def extract_unbiased_docx_headings(doc: Document) -> List[Dict[str, Any]]:
+    """
+    Extract headings from DOCX using style and font size analysis.
+
+    This function uses a two-pass approach:
+    1. Pass 1: Collect paragraph metadata (style, font size, bold)
+    2. Pass 2: Classify headings using semantic styles or visual inference
+
+    Args:
+        doc: python-docx Document object
+
+    Returns:
+        List of heading dictionaries with keys:
+            - index: Paragraph index
+            - level: Heading level (H1, H2, H3, etc.)
+            - text: Heading text
+            - font_size: Average font size in points
+            - style: Style name
+            - bold: Whether text is bold
+    """
+    logger.debug("Starting unbiased DOCX heading extraction")
+
+    paragraphs = []
+    font_sizes = []
+
+    # Pass 1: Collect paragraph metadata
+    for idx, para in enumerate(doc.paragraphs):
+        text = para.text.strip()
+        if not text:
+            continue
+
+        style = para.style.name if para.style else ""
+
+        # Calculate average font size from runs
+        runs = para.runs
+        sizes = [run.font.size.pt for run in runs if run.font.size]
+        avg_size = sum(sizes) / len(sizes) if sizes else None
+
+        bold = any(run.bold for run in runs)
+
+        paragraphs.append({
+            "index": idx,
+            "text": text,
+            "style": style,
+            "size": avg_size,
+            "bold": bold
+        })
+
+        if avg_size:
+            font_sizes.append(round(avg_size, 1))
+
+    # Determine body font size (most common size)
+    body_size = None
+    if font_sizes:
+        body_size = Counter(font_sizes).most_common(1)[0][0]
+        logger.debug(f"Detected body font size: {body_size}pt")
+
+    headings = []
+
+    # Pass 2: Classify headings
+    for p in paragraphs:
+        text = p["text"]
+        style = p["style"]
+        size = p["size"]
+        bold = p["bold"]
+
+        level = None
+
+        # Primary: Use semantic styles (Heading 1, Heading 2, etc.)
+        if style.startswith("Heading"):
+            try:
+                n = int(style.split()[-1])
+                level = f"H{n}"
+                logger.debug(f"Found semantic heading: {level} - '{text[:50]}'")
+            except ValueError:
+                pass
+
+        # Fallback: Visual inference based on font size
+        elif body_size and size:
+            if size >= body_size * 1.6:
+                level = "H1"
+            elif size >= body_size * 1.3:
+                level = "H2"
+            elif size > body_size and bold and len(text.split()) <= 12:
+                level = "H3"
+
+        if level:
+            headings.append({
+                "index": p["index"],
+                "level": level,
+                "text": text,
+                "font_size": size,
+                "style": style,
+                "bold": bold
+            })
+
+    logger.debug(f"Extracted {len(headings)} headings from DOCX using style/font analysis")
+    return headings
+
+
 def extract_text_from_document(
     file_path: Union[str, Path, io.BytesIO],
     file_type: Optional[str] = None,
@@ -319,6 +514,82 @@ def extract_text_from_document(
         raise Exception(f"Failed to extract text from document: {str(e)}") from e
 
 
+def _enrich_text_with_headings_structured(
+    text: str,
+    headings: List[str],
+    structured_headings: List[Dict[str, Any]]
+) -> str:
+    """
+    Enrich text using structured heading information with accurate level detection.
+
+    This enhanced version uses font size analysis results to apply correct heading levels
+    instead of relying on heuristic-based level detection.
+
+    Args:
+        text: Original page text
+        headings: List of all detected headings (combined from various sources)
+        structured_headings: List of structured heading dicts with 'text', 'level', 'font_size', etc.
+
+    Returns:
+        Text with headings properly formatted as markdown headers with correct levels
+    """
+    if not headings:
+        return text
+
+    enriched_text = text
+
+    # Create a mapping of heading text to level for quick lookup
+    heading_level_map = {}
+    for sh in structured_headings:
+        heading_level_map[sh['text']] = sh['level']
+
+    # For each heading, ensure it's formatted as a markdown header
+    for heading in headings:
+        # Check if heading exists in text
+        if heading not in enriched_text:
+            continue
+
+        # Check if it's already formatted as markdown header
+        markdown_variants = [
+            f"# {heading}",
+            f"## {heading}",
+            f"### {heading}",
+            f"#### {heading}",
+            f"##### {heading}",
+            f"###### {heading}"
+        ]
+
+        # If already markdown formatted, skip
+        is_already_markdown = any(variant in enriched_text for variant in markdown_variants)
+        if is_already_markdown:
+            continue
+
+        # Get level from structured headings (if available), otherwise use simple detection
+        if heading in heading_level_map:
+            level_str = heading_level_map[heading]  # e.g., "H1", "H2", "H3"
+            level = int(level_str[1])  # Extract numeric level
+        else:
+            # Fallback to simple detection for pattern-based headings
+            level = _detect_heading_level_simple(heading)
+
+        markdown_prefix = "#" * level + " "
+
+        # Escape special regex characters in heading
+        escaped_heading = re.escape(heading)
+
+        # Pattern: Heading on its own line (with optional surrounding whitespace)
+        pattern = re.compile(
+            rf'(^|\n)[ \t]*{escaped_heading}[ \t]*($|\n)',
+            re.MULTILINE
+        )
+
+        # Replace with markdown formatted version
+        replacement = rf'\1{markdown_prefix}{heading}\2'
+        enriched_text = pattern.sub(replacement, enriched_text, count=1)
+
+    return enriched_text
+
+
 def _enrich_text_with_headings(text: str, headings: List[str]) -> str:
     """
     Enrich text by ensuring headings are properly formatted as markdown headers.
@@ -337,6 +608,9 @@ def _enrich_text_with_headings(text: str, headings: List[str]) -> str:
 
     Returns:
         Text with headings properly formatted as markdown headers
+
+    Note: This is the fallback version. Use _enrich_text_with_headings_structured when
+    structured heading information is available.
     """
     if not headings:
         return text
@@ -454,13 +728,27 @@ def _extract_from_pdf_with_metadata(
     """Extract text from PDF with full metadata."""
     try:
         logger.debug("Starting PDF text extraction with metadata")
-        
+
         if isinstance(file_path, io.BytesIO):
             doc = fitz.open(stream=file_path, filetype="pdf")
         else:
             doc = fitz.open(file_path)
-        
+
         detector = TextPatternDetector()
+
+        # NEW: Extract structured headings using font size analysis (entire document)
+        logger.debug("Extracting structured headings using font analysis")
+        structured_headings_all = extract_unbiased_pdf_headings(doc)
+        logger.info(f"Font analysis detected {len(structured_headings_all)} headings across document")
+
+        # Group structured headings by page for easy lookup
+        structured_headings_by_page = {}
+        for heading in structured_headings_all:
+            page_num = heading['page']
+            if page_num not in structured_headings_by_page:
+                structured_headings_by_page[page_num] = []
+            structured_headings_by_page[page_num].append(heading)
+
         pages_metadata = []
         all_text_parts = []
         all_urls = set()
@@ -469,7 +757,7 @@ def _extract_from_pdf_with_metadata(
         # BUG FIX: Track headings in order to preserve document hierarchy
         ordered_headings = []  # Preserve order for document-level sections
         toc_pages = []
-        
+
         for page_num in range(len(doc)):
             logger.debug(f"PDF Extraction: Processing page {page_num + 1}/{len(doc)}")
             page = doc[page_num]
@@ -482,8 +770,15 @@ def _extract_from_pdf_with_metadata(
             # Extract metadata for this page
             urls = detector.extract_urls(page_text)
             emails = detector.extract_emails(page_text)
-            headings = detector.extract_headings(page_text)
+            headings = detector.extract_headings(page_text)  # Pattern-based headings
             has_toc = detector.detect_toc(page_text)
+
+            # NEW: Get structured headings for this page (from font analysis)
+            page_structured_headings = structured_headings_by_page.get(page_num + 1, [])
+
+            # Merge pattern-based and font-based headings (union of both)
+            font_based_heading_texts = [h['text'] for h in page_structured_headings]
+            combined_headings = list(set(headings + font_based_heading_texts))
 
             if has_toc:
                 toc_pages.append(page_num + 1)
@@ -493,21 +788,25 @@ def _extract_from_pdf_with_metadata(
                 logger.debug(f"PDF Extraction: Page {page_num + 1} - Found URLs: {urls[:3]}{'...' if len(urls) > 3 else ''}")
             if emails:
                 logger.debug(f"PDF Extraction: Page {page_num + 1} - Found emails: {emails[:3]}{'...' if len(emails) > 3 else ''}")
-            if headings:
-                logger.debug(f"PDF Extraction: Page {page_num + 1} - Found {len(headings)} headings")
+            if combined_headings:
+                logger.debug(f"PDF Extraction: Page {page_num + 1} - Found {len(combined_headings)} headings ({len(headings)} pattern-based, {len(font_based_heading_texts)} font-based)")
 
             # Update global collections
             all_urls.update(urls)
             all_emails.update(emails)
-            all_headings.update(headings)
+            all_headings.update(combined_headings)
             # BUG FIX: Preserve heading order for document-level sections
-            for heading in headings:
+            for heading in combined_headings:
                 if heading not in ordered_headings:  # Avoid duplicates while preserving order
                     ordered_headings.append(heading)
 
-            # BUG FIX: Enrich page text with properly formatted headings
+            # BUG FIX: Enrich page text with properly formatted headings (with level info)
             # This ensures headings flow through to normalization, chunking, and embeddings
-            enriched_page_text = _enrich_text_with_headings(page_text, headings)
+            enriched_page_text = _enrich_text_with_headings_structured(
+                page_text,
+                combined_headings,
+                page_structured_headings
+            )
 
             # Create page metadata
             page_meta = PageMetadata(
@@ -517,7 +816,8 @@ def _extract_from_pdf_with_metadata(
                 word_count=word_count,
                 urls=urls,
                 emails=emails,
-                headings=headings,
+                headings=combined_headings,  # Combined headings
+                headings_structured=page_structured_headings,  # NEW: Structured headings with levels
                 has_toc=has_toc,
                 sections=[]  # PDF pages don't have section breaks within a page
             )
@@ -645,6 +945,11 @@ def _extract_from_docx_with_metadata(
 
         detector = TextPatternDetector()
 
+        # NEW: Extract structured headings using style and font size analysis
+        logger.debug("Extracting structured headings using style/font analysis")
+        structured_headings = extract_unbiased_docx_headings(doc)
+        logger.info(f"Style/font analysis detected {len(structured_headings)} headings in DOCX")
+
         # Track sections and their content
         sections = []
         current_section_text = []
@@ -706,28 +1011,38 @@ def _extract_from_docx_with_metadata(
         # Extract metadata
         urls = detector.extract_urls(full_text)
         emails = detector.extract_emails(full_text)
-        headings = detector.extract_headings(full_text)
+        headings = detector.extract_headings(full_text)  # Pattern-based headings
 
-        # Combine detected headings with DOCX heading styles
-        # BUG FIX: Preserve order when combining headings
+        # NEW: Merge all heading sources (styles, patterns, structured font-based)
+        # BUG FIX: Preserve order when combining headings from multiple sources
         all_headings_ordered = []
         seen_headings = set()
+
         # First add section_titles (from DOCX styles) in order
         for heading in section_titles:
             if heading not in seen_headings:
                 all_headings_ordered.append(heading)
                 seen_headings.add(heading)
-        # Then add pattern-detected headings
+
+        # Then add structured headings (from font/style analysis)
+        font_based_heading_texts = [h['text'] for h in structured_headings]
+        for heading in font_based_heading_texts:
+            if heading not in seen_headings:
+                all_headings_ordered.append(heading)
+                seen_headings.add(heading)
+
+        # Finally add pattern-detected headings
         for heading in headings:
             if heading not in seen_headings:
                 all_headings_ordered.append(heading)
                 seen_headings.add(heading)
 
         all_headings = all_headings_ordered
+        logger.debug(f"Combined headings: {len(section_titles)} style-based, {len(font_based_heading_texts)} font-based, {len(headings)} pattern-based = {len(all_headings)} total")
 
-        # BUG FIX: Enrich text with properly formatted headings
+        # BUG FIX: Enrich text with properly formatted headings using structured info
         # This ensures headings flow through to normalization, chunking, and embeddings
-        full_text = _enrich_text_with_headings(full_text, all_headings)
+        full_text = _enrich_text_with_headings_structured(full_text, all_headings, structured_headings)
 
         has_toc = detector.detect_toc(full_text)
 
@@ -740,7 +1055,8 @@ def _extract_from_docx_with_metadata(
             word_count=len(full_text.split()),
             urls=urls,
             emails=emails,
-            headings=all_headings,
+            headings=all_headings,  # Combined headings
+            headings_structured=structured_headings,  # NEW: Structured headings with levels
             has_toc=has_toc,
             sections=all_headings  # Use all headings, not just section_titles
         )
