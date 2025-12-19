@@ -1,73 +1,55 @@
-version: "3.9"
-
 services:
-  # -------------------------------------
-  # Qdrant Vector Database
-  # -------------------------------------
-  knowvec_db:
-    image: qdrant/qdrant:v1.13.3
-    container_name: knowvec_qdrant_db
-    restart: unless-stopped
-    ports:
-      - "7333:6333"   # REST
-      - "7334:6334"   # gRPC
-    volumes:
-      - knowvec_data:/qdrant/storage
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "http://localhost:6333/collections"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+  # Qdrant Vector Database - COMMENTED OUT (using existing enterprise-rag-qdrant container)
+  # qdrant:
+  #   image: qdrant/qdrant:latest
+  #   container_name: knowvec-qdrant
+  #   ports:
+  #     - "6333:6333"  # REST API
+  #     - "6334:6334"  # gRPC API
+  #   volumes:
+  #     - qdrant_storage:/qdrant/storage
+  #   environment:
+  #     - QDRANT__SERVICE__GRPC_PORT=6334
+  #   networks:
+  #     - knowvec-network
+  #   restart: unless-stopped
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:6333/health || exit 1"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+  #     start_period: 40s
 
-    networks:
-      - knowvec_network
-
-  # -------------------------------------
-  # KnowVec FastAPI Service
-  # -------------------------------------
-  api:
+  # KnowVec RAG Application
+  knowvec:
     build:
       context: .
       dockerfile: Dockerfile
-    image: knowvec_api:latest
-    container_name: knowvec_api
-    restart: unless-stopped
-
-    depends_on:
-      knowvec_db:
-        condition: service_healthy
-
-    environment:
-      QDRANT_URL: "http://knowvec_db:6333"
-      EMBEDDING_MODEL: "all-MiniLM-L6-v2"
-      HF_HOME: "/home/appuser/.cache/huggingface"
-      TRANSFORMERS_CACHE: "/home/appuser/.cache/huggingface"
-
+    container_name: knowvec-app
     ports:
       - "8007:8007"
-
     volumes:
-      # Mount your code ONLY → keeps libraries intact
-      - .:/app/src
-      # Persistent HuggingFace model cache
-      - hf_models:/home/appuser/.cache/huggingface
-
+      - ./data:/app/data  # For persistent data storage
+      - ./logs:/app/logs  # For log files
+    env_file:
+      - .env  # Load all environment variables from .env file
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # Enable connection to host's Qdrant container
     networks:
-      - knowvec_network
+      - knowvec-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8007/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
+# Volumes - qdrant_storage commented out (using external Qdrant)
+# volumes:
+#   qdrant_storage:
+#     driver: local
 
-# -------------------------------------
-# VOLUMES
-# -------------------------------------
-volumes:
-  knowvec_data:
-    driver: local
-  hf_models:
-    driver: local
-
-# -------------------------------------
-# NETWORK
-# -------------------------------------
 networks:
-  knowvec_network:
+  knowvec-network:
     driver: bridge
