@@ -17,8 +17,9 @@ from document_to_vector_service import (
 )
 from logger_config import get_logger
 from list_documents_and_embeddings import DocumentLister
-from query_intent_classifier import QueryIntentClassifier, QueryIntent
-from query_analyzer import EnhancedQueryAnalyzer
+# COMMENTED OUT: Advanced search features (optional modules)
+# from query_intent_classifier import QueryIntentClassifier, QueryIntent
+# from query_analyzer import EnhancedQueryAnalyzer
 from config import get_config
 
 # Initialize logger
@@ -73,15 +74,16 @@ document_lister = DocumentLister(
 )
 logger.info("DocumentLister initialized successfully")
 
-# Initialize Query Intent Classifier
-logger.info("Initializing QueryIntentClassifier")
-intent_classifier = QueryIntentClassifier()
-logger.info("QueryIntentClassifier initialized successfully")
-
-# Initialize Enhanced Query Analyzer
-logger.info("Initializing EnhancedQueryAnalyzer")
-query_analyzer = EnhancedQueryAnalyzer()
-logger.info("EnhancedQueryAnalyzer initialized successfully")
+# COMMENTED OUT: Advanced search features (optional modules)
+# # Initialize Query Intent Classifier
+# logger.info("Initializing QueryIntentClassifier")
+# intent_classifier = QueryIntentClassifier()
+# logger.info("QueryIntentClassifier initialized successfully")
+#
+# # Initialize Enhanced Query Analyzer
+# logger.info("Initializing EnhancedQueryAnalyzer")
+# query_analyzer = EnhancedQueryAnalyzer()
+# logger.info("EnhancedQueryAnalyzer initialized successfully")
 
 # ---------------------------------------------------------
 # FASTAPI APP
@@ -206,8 +208,10 @@ class DeleteDocumentResponse(BaseModel):
     message: str
 
 
+# COMMENTED OUT: Response models for advanced search features
+"""
 class IntentClassificationResponse(BaseModel):
-    """Response model for intent classification"""
+    '''Response model for intent classification'''
     query: str
     primary_intent: str
     confidence: float
@@ -218,12 +222,13 @@ class IntentClassificationResponse(BaseModel):
 
 
 class SearchWithIntentResponse(BaseModel):
-    """Response model for search with intent classification"""
+    '''Response model for search with intent classification'''
     query: str
     intent: IntentClassificationResponse
     results: List[SearchResponse]
     total_results: int
     search_time: float
+"""
 
 
 # ---------------------------------------------------------
@@ -915,9 +920,10 @@ def bulk_delete_documents(doc_ids: List[str] = Body(..., description="List of do
 
 
 # ---------------------------------------------------------
-# 1️⃣1️⃣ CLASSIFY QUERY INTENT
+# 1️⃣1️⃣ CLASSIFY QUERY INTENT (COMMENTED OUT - requires query_intent_classifier module)
 # ---------------------------------------------------------
-@app.post("/intent/classify", response_model=IntentClassificationResponse)
+"""
+# @app.post("/intent/classify", response_model=IntentClassificationResponse)
 def classify_intent(query: str = Body(..., embed=True, description="Query to classify")):
     """
     Classify the intent of a user query.
@@ -1345,3 +1351,4 @@ def advanced_search(
             exc_info=True
         )
         raise HTTPException(status_code=500, detail=str(e))
+"""
