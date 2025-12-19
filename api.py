@@ -208,10 +208,8 @@ class DeleteDocumentResponse(BaseModel):
     message: str
 
 
-# COMMENTED OUT: Response models for advanced search features
-"""
 class IntentClassificationResponse(BaseModel):
-    '''Response model for intent classification'''
+    """Response model for intent classification"""
     query: str
     primary_intent: str
     confidence: float
@@ -222,13 +220,12 @@ class IntentClassificationResponse(BaseModel):
 
 
 class SearchWithIntentResponse(BaseModel):
-    '''Response model for search with intent classification'''
+    """Response model for search with intent classification"""
     query: str
     intent: IntentClassificationResponse
     results: List[SearchResponse]
     total_results: int
     search_time: float
-"""
 
 
 # ---------------------------------------------------------
@@ -920,445 +917,433 @@ def bulk_delete_documents(doc_ids: List[str] = Body(..., description="List of do
 
 
 # ---------------------------------------------------------
-# ADVANCED SEARCH ENDPOINTS (COMMENTED OUT)
+# 1️⃣1️⃣ CLASSIFY QUERY INTENT (COMMENTED OUT - requires query_intent_classifier module)
 # ---------------------------------------------------------
-# The following endpoints require optional modules:
-# - query_intent_classifier (for /intent/classify and /search/smart)
-# - query_analyzer (for /search/advanced)
-#
-# To enable these endpoints:
-# 1. Implement the required modules
-# 2. Uncomment the imports at the top of this file
-# 3. Uncomment the endpoint code below
-#
-# Available endpoints when enabled:
-# - POST /intent/classify - Classify query intent
-# - POST /search/smart - Intent-aware search
-# - POST /search/advanced - Advanced search with fallback
-# ---------------------------------------------------------
+# @app.post("/intent/classify", response_model=IntentClassificationResponse)
+# def classify_intent(query: str = Body(..., embed=True, description="Query to classify")):
+#     """
+#     Classify the intent of a user query.
 
+#     Identifies the type of query and provides recommendations for search optimization:
+#     - **Factual**: Who, what, when, where questions
+#     - **How-to**: Instructions, tutorials, guides
+#     - **Definition**: Explanations, definitions
+#     - **Comparison**: Comparing options
+#     - **Code/Technical**: Code examples, API docs
+#     - **Summary**: Overview, highlights
+#     - **Troubleshooting**: Error fixing, debugging
+#     - **Recommendation**: Best practices, suggestions
+#     - **Procedural**: Steps, workflows
+#     - **Conceptual**: Why, theory, concepts
 
-# ---------------------------------------------------------
-# MAIN
-    - **How-to**: Instructions, tutorials, guides
-    - **Definition**: Explanations, definitions
-    - **Comparison**: Comparing options
-    - **Code/Technical**: Code examples, API docs
-    - **Summary**: Overview, highlights
-    - **Troubleshooting**: Error fixing, debugging
-    - **Recommendation**: Best practices, suggestions
-    - **Procedural**: Steps, workflows
-    - **Conceptual**: Why, theory, concepts
+#     Returns intent classification with confidence scores and search recommendations.
 
-    Returns intent classification with confidence scores and search recommendations.
+#     Example request:
+#     ```json
+#     {
+#         "query": "How to implement authentication in Python"
+#     }
+#     ```
 
-    Example request:
-    ```json
-    {
-        "query": "How to implement authentication in Python"
-    }
-    ```
+#     Example response:
+#     ```json
+#     {
+#         "query": "How to implement authentication in Python",
+#         "primary_intent": "how_to",
+#         "confidence": 0.85,
+#         "secondary_intents": [
+#             {"intent": "code_technical", "confidence": 0.45}
+#         ],
+#         "recommended_filters": {"contains_code": true},
+#         "recommended_limit": 10,
+#         "recommended_score_threshold": 0.5
+#     }
+#     ```
+#     """
+#     start_time = time.time()
+#     logger.info(f"Intent classification request - Query: '{query[:50]}...'")
 
-    Example response:
-    ```json
-    {
-        "query": "How to implement authentication in Python",
-        "primary_intent": "how_to",
-        "confidence": 0.85,
-        "secondary_intents": [
-            {"intent": "code_technical", "confidence": 0.45}
-        ],
-        "recommended_filters": {"contains_code": true},
-        "recommended_limit": 10,
-        "recommended_score_threshold": 0.5
-    }
-    ```
-    """
-    start_time = time.time()
-    logger.info(f"Intent classification request - Query: '{query[:50]}...'")
+#     try:
+#         classification = intent_classifier.classify(query)
 
-    try:
-        classification = intent_classifier.classify(query)
+#         duration = time.time() - start_time
 
-        duration = time.time() - start_time
+#         response = IntentClassificationResponse(
+#             query=query,
+#             primary_intent=classification.primary_intent.value,
+#             confidence=classification.confidence,
+#             secondary_intents=[
+#                 {"intent": intent.value, "confidence": conf}
+#                 for intent, conf in classification.secondary_intents
+#             ],
+#             recommended_filters=classification.recommended_filters,
+#             recommended_limit=classification.recommended_limit,
+#             recommended_score_threshold=classification.recommended_score_threshold
+#         )
 
-        response = IntentClassificationResponse(
-            query=query,
-            primary_intent=classification.primary_intent.value,
-            confidence=classification.confidence,
-            secondary_intents=[
-                {"intent": intent.value, "confidence": conf}
-                for intent, conf in classification.secondary_intents
-            ],
-            recommended_filters=classification.recommended_filters,
-            recommended_limit=classification.recommended_limit,
-            recommended_score_threshold=classification.recommended_score_threshold
-        )
+#         logger.info(
+#             f"Intent classified - Intent: {classification.primary_intent.value}, "
+#             f"Confidence: {classification.confidence:.2f}, Duration: {duration:.3f}s"
+#         )
 
-        logger.info(
-            f"Intent classified - Intent: {classification.primary_intent.value}, "
-            f"Confidence: {classification.confidence:.2f}, Duration: {duration:.3f}s"
-        )
+#         return response
 
-        return response
-
-    except Exception as e:
-        duration = time.time() - start_time
-        logger.error(
-            f"Intent classification failed - Duration: {duration:.3f}s, Error: {str(e)}",
-            exc_info=True
-        )
-        raise HTTPException(status_code=500, detail=str(e))
+#     except Exception as e:
+#         duration = time.time() - start_time
+#         logger.error(
+#             f"Intent classification failed - Duration: {duration:.3f}s, Error: {str(e)}",
+#             exc_info=True
+#         )
+#         raise HTTPException(status_code=500, detail=str(e))
 
 
 # ---------------------------------------------------------
 # 1️⃣2️⃣ SMART SEARCH (with Intent Classification)
 # ---------------------------------------------------------
-@app.post("/search/smart", response_model=SearchWithIntentResponse)
-def smart_search(
-    query: str = Body(..., embed=True, description="Search query"),
-    use_intent_filters: bool = Body(True, description="Apply intent-based filters"),
-    use_intent_limits: bool = Body(True, description="Apply intent-based limits"),
-    override_filters: Optional[Dict[str, Any]] = Body(None, description="Manual filter overrides")
-):
-    """
-    Smart search with automatic intent classification and optimization.
+# @app.post("/search/smart", response_model=SearchWithIntentResponse)
+# def smart_search(
+#     query: str = Body(..., embed=True, description="Search query"),
+#     use_intent_filters: bool = Body(True, description="Apply intent-based filters"),
+#     use_intent_limits: bool = Body(True, description="Apply intent-based limits"),
+#     override_filters: Optional[Dict[str, Any]] = Body(None, description="Manual filter overrides")
+# ):
+#     """
+#     Smart search with automatic intent classification and optimization.
 
-    This endpoint:
-    1. Classifies the query intent
-    2. Applies intent-specific search strategies
-    3. Returns results optimized for the query type
+#     This endpoint:
+#     1. Classifies the query intent
+#     2. Applies intent-specific search strategies
+#     3. Returns results optimized for the query type
 
-    **Benefits:**
-    - Better relevance for different query types
-    - Automatic filter selection
-    - Optimized result limits
-    - Intent-aware scoring thresholds
+#     **Benefits:**
+#     - Better relevance for different query types
+#     - Automatic filter selection
+#     - Optimized result limits
+#     - Intent-aware scoring thresholds
 
-    **Intent-Specific Strategies:**
-    - **Summary queries** → Search document summaries first
-    - **Code queries** → Filter for code-heavy chunks
-    - **Troubleshooting** → Cast wider net, lower threshold
-    - **Definition queries** → Prefer early chunks, higher threshold
-    - **Comparison** → Return more results for multiple perspectives
+#     **Intent-Specific Strategies:**
+#     - **Summary queries** → Search document summaries first
+#     - **Code queries** → Filter for code-heavy chunks
+#     - **Troubleshooting** → Cast wider net, lower threshold
+#     - **Definition queries** → Prefer early chunks, higher threshold
+#     - **Comparison** → Return more results for multiple perspectives
 
-    Example request:
-    ```json
-    {
-        "query": "Show me code examples for authentication",
-        "use_intent_filters": true,
-        "use_intent_limits": true
-    }
-    ```
+#     Example request:
+#     ```json
+#     {
+#         "query": "Show me code examples for authentication",
+#         "use_intent_filters": true,
+#         "use_intent_limits": true
+#     }
+#     ```
 
-    Example response:
-    ```json
-    {
-        "query": "Show me code examples for authentication",
-        "intent": {
-            "primary_intent": "code_technical",
-            "confidence": 0.82,
-            "recommended_filters": {"contains_code": true}
-        },
-        "results": [
-            {"id": "...", "score": 0.89, "text": "...", "metadata": {...}}
-        ],
-        "total_results": 8,
-        "search_time": 0.234
-    }
-    ```
-    """
-    start_time = time.time()
-    logger.info(f"Smart search request - Query: '{query[:50]}...', Use filters: {use_intent_filters}")
+#     Example response:
+#     ```json
+#     {
+#         "query": "Show me code examples for authentication",
+#         "intent": {
+#             "primary_intent": "code_technical",
+#             "confidence": 0.82,
+#             "recommended_filters": {"contains_code": true}
+#         },
+#         "results": [
+#             {"id": "...", "score": 0.89, "text": "...", "metadata": {...}}
+#         ],
+#         "total_results": 8,
+#         "search_time": 0.234
+#     }
+#     ```
+#     """
+#     start_time = time.time()
+#     logger.info(f"Smart search request - Query: '{query[:50]}...', Use filters: {use_intent_filters}")
 
-    try:
-        # Step 1: Classify intent
-        classification = intent_classifier.classify(query)
+#     try:
+#         # Step 1: Classify intent
+#         classification = intent_classifier.classify(query)
 
-        logger.info(
-            f"Intent detected: {classification.primary_intent.value} "
-            f"(confidence: {classification.confidence:.2f})"
-        )
+#         logger.info(
+#             f"Intent detected: {classification.primary_intent.value} "
+#             f"(confidence: {classification.confidence:.2f})"
+#         )
 
-        # Step 2: Build search parameters based on intent
-        filters = {}
-        limit = 10
-        score_threshold = 0.5
+#         # Step 2: Build search parameters based on intent
+#         filters = {}
+#         limit = 10
+#         score_threshold = 0.5
 
-        if use_intent_filters and classification.recommended_filters:
-            filters.update(classification.recommended_filters)
-            logger.debug(f"Applied intent filters: {filters}")
+#         if use_intent_filters and classification.recommended_filters:
+#             filters.update(classification.recommended_filters)
+#             logger.debug(f"Applied intent filters: {filters}")
 
-        if use_intent_limits:
-            limit = classification.recommended_limit
-            score_threshold = classification.recommended_score_threshold
-            logger.debug(f"Applied intent limits: limit={limit}, threshold={score_threshold}")
+#         if use_intent_limits:
+#             limit = classification.recommended_limit
+#             score_threshold = classification.recommended_score_threshold
+#             logger.debug(f"Applied intent limits: limit={limit}, threshold={score_threshold}")
 
-        # Apply manual overrides
-        if override_filters:
-            filters.update(override_filters)
-            logger.debug(f"Applied override filters: {override_filters}")
+#         # Apply manual overrides
+#         if override_filters:
+#             filters.update(override_filters)
+#             logger.debug(f"Applied override filters: {override_filters}")
 
-        # Step 3: Execute search
-        if filters:
-            results = service.search(
-                query=query,
-                limit=limit,
-                filters=filters,
-                score_threshold=score_threshold
-            )
-        else:
-            results = service.search(
-                query=query,
-                limit=limit,
-                score_threshold=score_threshold
-            )
+#         # Step 3: Execute search
+#         if filters:
+#             results = service.search(
+#                 query=query,
+#                 limit=limit,
+#                 filters=filters,
+#                 score_threshold=score_threshold
+#             )
+#         else:
+#             results = service.search(
+#                 query=query,
+#                 limit=limit,
+#                 score_threshold=score_threshold
+#             )
 
-        # Step 4: Format response
-        formatted_results = [
-            {
-                "id": str(r.get("payload", {}).get("chunk_id")),
-                "score": r.get("score"),
-                "text": r.get("payload", {}).get("text"),
-                "metadata": r.get("payload", {}),
-            }
-            for r in results
-        ]
+#         # Step 4: Format response
+#         formatted_results = [
+#             {
+#                 "id": str(r.get("payload", {}).get("chunk_id")),
+#                 "score": r.get("score"),
+#                 "text": r.get("payload", {}).get("text"),
+#                 "metadata": r.get("payload", {}),
+#             }
+#             for r in results
+#         ]
 
-        duration = time.time() - start_time
+#         duration = time.time() - start_time
 
-        response = SearchWithIntentResponse(
-            query=query,
-            intent=IntentClassificationResponse(
-                query=query,
-                primary_intent=classification.primary_intent.value,
-                confidence=classification.confidence,
-                secondary_intents=[
-                    {"intent": intent.value, "confidence": conf}
-                    for intent, conf in classification.secondary_intents
-                ],
-                recommended_filters=classification.recommended_filters,
-                recommended_limit=classification.recommended_limit,
-                recommended_score_threshold=classification.recommended_score_threshold
-            ),
-            results=formatted_results,
-            total_results=len(formatted_results),
-            search_time=duration
-        )
+#         response = SearchWithIntentResponse(
+#             query=query,
+#             intent=IntentClassificationResponse(
+#                 query=query,
+#                 primary_intent=classification.primary_intent.value,
+#                 confidence=classification.confidence,
+#                 secondary_intents=[
+#                     {"intent": intent.value, "confidence": conf}
+#                     for intent, conf in classification.secondary_intents
+#                 ],
+#                 recommended_filters=classification.recommended_filters,
+#                 recommended_limit=classification.recommended_limit,
+#                 recommended_score_threshold=classification.recommended_score_threshold
+#             ),
+#             results=formatted_results,
+#             total_results=len(formatted_results),
+#             search_time=duration
+#         )
 
-        logger.info(
-            f"Smart search completed - Intent: {classification.primary_intent.value}, "
-            f"Results: {len(formatted_results)}, Duration: {duration:.3f}s"
-        )
+#         logger.info(
+#             f"Smart search completed - Intent: {classification.primary_intent.value}, "
+#             f"Results: {len(formatted_results)}, Duration: {duration:.3f}s"
+#         )
 
-        return response
+#         return response
 
-    except Exception as e:
-        duration = time.time() - start_time
-        logger.error(
-            f"Smart search failed - Duration: {duration:.3f}s, Error: {str(e)}",
-            exc_info=True
-        )
-        raise HTTPException(status_code=500, detail=str(e))
+#     except Exception as e:
+#         duration = time.time() - start_time
+#         logger.error(
+#             f"Smart search failed - Duration: {duration:.3f}s, Error: {str(e)}",
+#             exc_info=True
+#         )
+#         raise HTTPException(status_code=500, detail=str(e))
 
 
 # ---------------------------------------------------------
 # 1️⃣3️⃣ ADVANCED SEARCH (with Enhanced Analysis & Fallback)
 # ---------------------------------------------------------
-@app.post("/search/advanced")
-def advanced_search(
-    query: str = Body(..., embed=True, description="Search query"),
-    min_results: int = Body(1, description="Minimum results before fallback"),
-    max_results: int = Body(20, description="Maximum results to return")
-):
-    """
-    Advanced search with enhanced query analysis and automatic fallback strategies.
+# @app.post("/search/advanced")
+# def advanced_search(
+#     query: str = Body(..., embed=True, description="Search query"),
+#     min_results: int = Body(1, description="Minimum results before fallback"),
+#     max_results: int = Body(20, description="Maximum results to return")
+# ):
+#     """
+#     Advanced search with enhanced query analysis and automatic fallback strategies.
 
-    **Key Features:**
-    - Enhanced scope detection (document vs section level)
-    - Specificity analysis (broad vs specific)
-    - Automatic summary routing
-    - Fallback strategies when no results found
-    - Post-filtering to exclude summaries for specific queries
+#     **Key Features:**
+#     - Enhanced scope detection (document vs section level)
+#     - Specificity analysis (broad vs specific)
+#     - Automatic summary routing
+#     - Fallback strategies when no results found
+#     - Post-filtering to exclude summaries for specific queries
 
-    **Handles Edge Cases:**
-    - "what is covered in document" → Summary (with fallback to sections)
-    - "git staging area explanation" → Sections only (excludes summary)
-    - "git working directory and staging area" → Sections (multiple topics)
-    - "overview of git" → Summary first (with fallback)
+#     **Handles Edge Cases:**
+#     - "what is covered in document" → Summary (with fallback to sections)
+#     - "git staging area explanation" → Sections only (excludes summary)
+#     - "git working directory and staging area" → Sections (multiple topics)
+#     - "overview of git" → Summary first (with fallback)
 
-    **Search Strategies:**
-    1. **summary_first**: Search summaries first, fallback to sections if needed
-    2. **section_only**: Search sections only, exclude summaries
-    3. **hybrid**: Search all chunks, rank by relevance
-    4. **summary_only**: Only return document summaries
+#     **Search Strategies:**
+#     1. **summary_first**: Search summaries first, fallback to sections if needed
+#     2. **section_only**: Search sections only, exclude summaries
+#     3. **hybrid**: Search all chunks, rank by relevance
+#     4. **summary_only**: Only return document summaries
 
-    Example request:
-    ```json
-    {
-        "query": "what is covered in document",
-        "min_results": 1,
-        "max_results": 10
-    }
-    ```
+#     Example request:
+#     ```json
+#     {
+#         "query": "what is covered in document",
+#         "min_results": 1,
+#         "max_results": 10
+#     }
+#     ```
 
-    Example response:
-    ```json
-    {
-        "query": "what is covered in document",
-        "analysis": {
-            "scope": "document_level",
-            "specificity": "very_broad",
-            "strategy": "summary_first",
-            "confidence": 0.85
-        },
-        "results": [...],
-        "total_results": 3,
-        "search_time": 0.123,
-        "fallback_used": false,
-        "summary_excluded": false
-    }
-    ```
-    """
-    start_time = time.time()
-    logger.info(f"Advanced search request - Query: '{query[:50]}...'")
+#     Example response:
+#     ```json
+#     {
+#         "query": "what is covered in document",
+#         "analysis": {
+#             "scope": "document_level",
+#             "specificity": "very_broad",
+#             "strategy": "summary_first",
+#             "confidence": 0.85
+#         },
+#         "results": [...],
+#         "total_results": 3,
+#         "search_time": 0.123,
+#         "fallback_used": false,
+#         "summary_excluded": false
+#     }
+#     ```
+#     """
+#     start_time = time.time()
+#     logger.info(f"Advanced search request - Query: '{query[:50]}...'")
 
-    try:
-        # Step 1: Analyze query
-        analysis = query_analyzer.analyze(query)
+#     try:
+#         # Step 1: Analyze query
+#         analysis = query_analyzer.analyze(query)
 
-        logger.info(
-            f"Query analyzed - Scope: {analysis.scope.value}, "
-            f"Specificity: {analysis.specificity.value}, "
-            f"Strategy: {analysis.search_strategy}"
-        )
+#         logger.info(
+#             f"Query analyzed - Scope: {analysis.scope.value}, "
+#             f"Specificity: {analysis.specificity.value}, "
+#             f"Strategy: {analysis.search_strategy}"
+#         )
 
-        # Step 2: Execute search based on strategy
-        results = []
-        fallback_used = False
-        summary_excluded_count = 0
+#         # Step 2: Execute search based on strategy
+#         results = []
+#         fallback_used = False
+#         summary_excluded_count = 0
 
-        if analysis.search_strategy == 'summary_first':
-            # Try summary first
-            logger.debug("Executing summary-first search...")
-            if analysis.recommended_filters:
-                results = service.search(
-                    query=query,
-                    limit=max_results,
-                    filters=analysis.recommended_filters,
-                    score_threshold=0.5
-                )
-            else:
-                results = service.search(query=query, limit=max_results, score_threshold=0.5)
+#         if analysis.search_strategy == 'summary_first':
+#             # Try summary first
+#             logger.debug("Executing summary-first search...")
+#             if analysis.recommended_filters:
+#                 results = service.search(
+#                     query=query,
+#                     limit=max_results,
+#                     filters=analysis.recommended_filters,
+#                     score_threshold=0.5
+#                 )
+#             else:
+#                 results = service.search(query=query, limit=max_results, score_threshold=0.5)
 
-            # Fallback to sections if not enough results
-            if len(results) < min_results and analysis.fallback_strategy:
-                logger.info(f"Insufficient results ({len(results)}), using fallback strategy")
-                fallback_results = service.search(query=query, limit=max_results, score_threshold=0.4)
+#             # Fallback to sections if not enough results
+#             if len(results) < min_results and analysis.fallback_strategy:
+#                 logger.info(f"Insufficient results ({len(results)}), using fallback strategy")
+#                 fallback_results = service.search(query=query, limit=max_results, score_threshold=0.4)
 
-                # Filter out summaries from fallback
-                fallback_results = [
-                    r for r in fallback_results
-                    if r.get('payload', {}).get('section_title') != '[DOCUMENT SUMMARY]'
-                ]
+#                 # Filter out summaries from fallback
+#                 fallback_results = [
+#                     r for r in fallback_results
+#                     if r.get('payload', {}).get('section_title') != '[DOCUMENT SUMMARY]'
+#                 ]
 
-                results.extend(fallback_results)
-                fallback_used = True
+#                 results.extend(fallback_results)
+#                 fallback_used = True
 
-        elif analysis.search_strategy == 'section_only':
-            # Search all, then exclude summaries
-            logger.debug("Executing section-only search...")
-            all_results = service.search(query=query, limit=max_results * 2, score_threshold=0.4)
+#         elif analysis.search_strategy == 'section_only':
+#             # Search all, then exclude summaries
+#             logger.debug("Executing section-only search...")
+#             all_results = service.search(query=query, limit=max_results * 2, score_threshold=0.4)
 
-            # Post-filter: exclude summary chunks
-            results = [
-                r for r in all_results
-                if r.get('payload', {}).get('section_title') != '[DOCUMENT SUMMARY]'
-            ]
+#             # Post-filter: exclude summary chunks
+#             results = [
+#                 r for r in all_results
+#                 if r.get('payload', {}).get('section_title') != '[DOCUMENT SUMMARY]'
+#             ]
 
-            summary_excluded_count = len(all_results) - len(results)
-            results = results[:max_results]
+#             summary_excluded_count = len(all_results) - len(results)
+#             results = results[:max_results]
 
-            logger.debug(f"Excluded {summary_excluded_count} summary chunks")
+#             logger.debug(f"Excluded {summary_excluded_count} summary chunks")
 
-        elif analysis.search_strategy == 'hybrid':
-            # Search all chunks, let relevance decide
-            logger.debug("Executing hybrid search...")
-            results = service.search(query=query, limit=max_results, score_threshold=0.45)
+#         elif analysis.search_strategy == 'hybrid':
+#             # Search all chunks, let relevance decide
+#             logger.debug("Executing hybrid search...")
+#             results = service.search(query=query, limit=max_results, score_threshold=0.45)
 
-            # If specificity is high and summaries appear, consider excluding
-            if analysis.specificity_score > 0.7:
-                non_summary_results = [
-                    r for r in results
-                    if r.get('payload', {}).get('section_title') != '[DOCUMENT SUMMARY]'
-                ]
+#             # If specificity is high and summaries appear, consider excluding
+#             if analysis.specificity_score > 0.7:
+#                 non_summary_results = [
+#                     r for r in results
+#                     if r.get('payload', {}).get('section_title') != '[DOCUMENT SUMMARY]'
+#                 ]
 
-                # Only use non-summary if we have enough
-                if len(non_summary_results) >= min_results:
-                    summary_excluded_count = len(results) - len(non_summary_results)
-                    results = non_summary_results
-                    logger.debug(f"Hybrid: Excluded {summary_excluded_count} summaries due to high specificity")
+#                 # Only use non-summary if we have enough
+#                 if len(non_summary_results) >= min_results:
+#                     summary_excluded_count = len(results) - len(non_summary_results)
+#                     results = non_summary_results
+#                     logger.debug(f"Hybrid: Excluded {summary_excluded_count} summaries due to high specificity")
 
-        else:  # 'summary_only'
-            logger.debug("Executing summary-only search...")
-            results = service.search(
-                query=query,
-                limit=max_results,
-                filters={"section_title": "[DOCUMENT SUMMARY]"},
-                score_threshold=0.5
-            )
+#         else:  # 'summary_only'
+#             logger.debug("Executing summary-only search...")
+#             results = service.search(
+#                 query=query,
+#                 limit=max_results,
+#                 filters={"section_title": "[DOCUMENT SUMMARY]"},
+#                 score_threshold=0.5
+#             )
 
-            # Fallback if no summaries found
-            if len(results) == 0:
-                logger.info("No summary results, falling back to sections")
-                results = service.search(query=query, limit=max_results, score_threshold=0.4)
-                fallback_used = True
+#             # Fallback if no summaries found
+#             if len(results) == 0:
+#                 logger.info("No summary results, falling back to sections")
+#                 results = service.search(query=query, limit=max_results, score_threshold=0.4)
+#                 fallback_used = True
 
-        # Step 3: Format results
-        formatted_results = [
-            {
-                "id": str(r.get("payload", {}).get("chunk_id")),
-                "score": r.get("score"),
-                "text": r.get("payload", {}).get("text"),
-                "metadata": r.get("payload", {}),
-                "is_summary": r.get("payload", {}).get("section_title") == "[DOCUMENT SUMMARY]"
-            }
-            for r in results[:max_results]
-        ]
+#         # Step 3: Format results
+#         formatted_results = [
+#             {
+#                 "id": str(r.get("payload", {}).get("chunk_id")),
+#                 "score": r.get("score"),
+#                 "text": r.get("payload", {}).get("text"),
+#                 "metadata": r.get("payload", {}),
+#                 "is_summary": r.get("payload", {}).get("section_title") == "[DOCUMENT SUMMARY]"
+#             }
+#             for r in results[:max_results]
+#         ]
 
-        duration = time.time() - start_time
+#         duration = time.time() - start_time
 
-        response = {
-            "query": query,
-            "analysis": {
-                "scope": analysis.scope.value,
-                "specificity": analysis.specificity.value,
-                "strategy": analysis.search_strategy,
-                "confidence": analysis.confidence,
-                "should_exclude_summary": analysis.should_exclude_summary,
-                "summary_only": analysis.summary_only
-            },
-            "results": formatted_results,
-            "total_results": len(formatted_results),
-            "search_time": duration,
-            "fallback_used": fallback_used,
-            "summary_excluded": summary_excluded_count > 0,
-            "summary_excluded_count": summary_excluded_count
-        }
+#         response = {
+#             "query": query,
+#             "analysis": {
+#                 "scope": analysis.scope.value,
+#                 "specificity": analysis.specificity.value,
+#                 "strategy": analysis.search_strategy,
+#                 "confidence": analysis.confidence,
+#                 "should_exclude_summary": analysis.should_exclude_summary,
+#                 "summary_only": analysis.summary_only
+#             },
+#             "results": formatted_results,
+#             "total_results": len(formatted_results),
+#             "search_time": duration,
+#             "fallback_used": fallback_used,
+#             "summary_excluded": summary_excluded_count > 0,
+#             "summary_excluded_count": summary_excluded_count
+#         }
 
-        logger.info(
-            f"Advanced search completed - Strategy: {analysis.search_strategy}, "
-            f"Results: {len(formatted_results)}, Fallback: {fallback_used}, "
-            f"Summaries excluded: {summary_excluded_count}, Duration: {duration:.3f}s"
-        )
+#         logger.info(
+#             f"Advanced search completed - Strategy: {analysis.search_strategy}, "
+#             f"Results: {len(formatted_results)}, Fallback: {fallback_used}, "
+#             f"Summaries excluded: {summary_excluded_count}, Duration: {duration:.3f}s"
+#         )
 
-        return response
+#         return response
 
-    except Exception as e:
-        duration = time.time() - start_time
-        logger.error(
-            f"Advanced search failed - Duration: {duration:.3f}s, Error: {str(e)}",
-            exc_info=True
-        )
-        raise HTTPException(status_code=500, detail=str(e))
-"""
+#     except Exception as e:
+#         duration = time.time() - start_time
+#         logger.error(
+#             f"Advanced search failed - Duration: {duration:.3f}s, Error: {str(e)}",
+#             exc_info=True
+#         )
+#         raise HTTPException(status_code=500, detail=str(e))
