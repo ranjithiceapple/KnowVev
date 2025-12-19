@@ -920,16 +920,26 @@ def bulk_delete_documents(doc_ids: List[str] = Body(..., description="List of do
 
 
 # ---------------------------------------------------------
-# 1️⃣1️⃣ CLASSIFY QUERY INTENT (COMMENTED OUT - requires query_intent_classifier module)
+# ADVANCED SEARCH ENDPOINTS (COMMENTED OUT)
 # ---------------------------------------------------------
-"""
-# @app.post("/intent/classify", response_model=IntentClassificationResponse)
-def classify_intent(query: str = Body(..., embed=True, description="Query to classify")):
-    """
-    Classify the intent of a user query.
+# The following endpoints require optional modules:
+# - query_intent_classifier (for /intent/classify and /search/smart)
+# - query_analyzer (for /search/advanced)
+#
+# To enable these endpoints:
+# 1. Implement the required modules
+# 2. Uncomment the imports at the top of this file
+# 3. Uncomment the endpoint code below
+#
+# Available endpoints when enabled:
+# - POST /intent/classify - Classify query intent
+# - POST /search/smart - Intent-aware search
+# - POST /search/advanced - Advanced search with fallback
+# ---------------------------------------------------------
 
-    Identifies the type of query and provides recommendations for search optimization:
-    - **Factual**: Who, what, when, where questions
+
+# ---------------------------------------------------------
+# MAIN
     - **How-to**: Instructions, tutorials, guides
     - **Definition**: Explanations, definitions
     - **Comparison**: Comparing options
