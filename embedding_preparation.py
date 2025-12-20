@@ -89,7 +89,10 @@ class EmbeddingRecord:
         Convert to Qdrant-compatible payload.
         Optimized for filtering and field-based queries.
         """
-        return {
+        # Extract project_id from embedding_metadata if present (for multi-tenancy)
+        project_id = self.embedding_metadata.get('project_id', None)
+
+        payload = {
             # IDs
             'chunk_id': self.chunk_id,
             'embedding_id': self.embedding_id,
@@ -138,6 +141,12 @@ class EmbeddingRecord:
             'created_at': self.created_at,
             'pipeline': self.processing_pipeline,
         }
+
+        # Add project_id as top-level field for efficient filtering (multi-tenancy)
+        if project_id:
+            payload['project_id'] = project_id
+
+        return payload
 
     def to_pinecone_metadata(self) -> Dict[str, Any]:
         """

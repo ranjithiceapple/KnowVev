@@ -146,6 +146,8 @@ class SearchResponse(BaseModel):
     score: float
     text: str
     metadata: dict
+    matched_chunk: bool = True  # Indicates if this was the originally matched chunk
+    section_expansion: bool = False  # Indicates if this chunk was added via section expansion
 
 
 class FilterSearchRequest(BaseModel):
@@ -162,6 +164,7 @@ class FilterSearchRequest(BaseModel):
     )
     limit: int = Field(default=10, ge=1, le=100, description="Maximum number of results")
     score_threshold: Optional[float] = Field(default=None, description="Minimum score threshold")
+    expand_to_section: bool = Field(default=False, description="Expand matched chunks to include full section context using heading_path")
 
 
 class MetadataFilterRequest(BaseModel):
@@ -244,6 +247,7 @@ def root():
 @app.post("/process")
 async def process_document(
     file: UploadFile = File(...),
+    project_id: Optional[str] = None,
     debug: bool = False
 ):
     """
@@ -251,10 +255,18 @@ async def process_document(
 
     Args:
         file: Document file to process
+        project_id: Optional project ID for multi-tenancy and data isolation
         debug: If True, saves pipeline stage outputs to pipeline_debug/ folder
+
+    Multi-Tenancy:
+        When project_id is provided, all chunks from this document are tagged with the project_id.
+        This enables filtered searches where users only see documents from their own projects.
     """
     start_time = time.time()
-    logger.info(f"Document processing started - Filename: {file.filename}, Content-Type: {file.content_type}, Debug mode: {debug}")
+    logger.info(
+        f"Document processing started - Filename: {file.filename}, "
+        f"Content-Type: {file.content_type}, Project ID: {project_id}, Debug mode: {debug}"
+    )
 
     try:
         # Temporary file path
@@ -279,7 +291,10 @@ async def process_document(
 
         # Process document using the full pipeline
         logger.info(f"Starting document processing pipeline for: {file.filename}")
-        result = service.process_document(temp_file_path)
+        result = service.process_document(
+            file_path=temp_file_path,
+            project_id=project_id
+        )
         logger.info(f"Document processing pipeline completed for: {file.filename}")
 
         # Cleanup
@@ -309,10 +324,13 @@ async def process_document(
         response = {
             "message": "Document processed successfully",
             "doc_id": result.doc_id,
+            "project_id": project_id,
             "pages_extracted": result.pages_extracted,
             "chunks_created": result.chunks_created,
             "unique_chunks": result.unique_chunks,
             "vectors_stored": result.vectors_stored,
+            "vector_ids": result.vector_ids,  # For Base Model tracking and deletion
+            "embedding_ids": result.embedding_ids,  # Alias
             "total_time": result.total_time
         }
 
@@ -339,29 +357,223 @@ async def process_document(
 
 
 # ---------------------------------------------------------
+# 1️⃣B DOCUMENT INGESTION VIA SHARED VOLUME PATH
+# ---------------------------------------------------------
+class ProcessPathRequest(BaseModel):
+    """Request model for processing documents via shared volume path"""
+    file_path: str = Field(..., description="Path to document file in shared volume")
+    project_id: Optional[str] = Field(None, description="Project ID for multi-tenancy")
+    callback_url: Optional[str] = Field(None, description="URL to callback when processing completes")
+    debug: bool = Field(False, description="Enable debug mode")
+
+
+@app.post("/process-path")
+async def process_document_by_path(request: ProcessPathRequest):
+    """
+    Process a document from a shared volume path.
+
+    This endpoint is optimized for Docker deployments where the Base Model
+    and RAG Microservice share a volume (e.g., /data/uploads).
+
+    Instead of uploading the file via HTTP, the Base Model:
+    1. Saves the file to the shared volume
+    2. Sends the file path to this endpoint
+    3. (Optional) Provides a callback_url for async notification
+
+    Benefits:
+    - Reduces network latency
+    - Avoids duplicating large files in memory
+    - Enables async processing with callbacks
+
+    Args:
+        file_path: Absolute path to document in shared volume
+        project_id: Optional project ID for multi-tenancy
+        callback_url: Optional webhook URL for completion notification
+        debug: Enable debug mode for pipeline inspection
+
+    Returns:
+        Processing result with doc_id, vector_ids, and statistics
+    """
+    start_time = time.time()
+    logger.info(
+        f"Path-based processing started - Path: {request.file_path}, "
+        f"Project ID: {request.project_id}, Callback: {request.callback_url}, Debug: {request.debug}"
+    )
+
+    try:
+        # Validate file exists
+        if not os.path.exists(request.file_path):
+            logger.error(f"File not found: {request.file_path}")
+            raise HTTPException(status_code=404, detail=f"File not found: {request.file_path}")
+
+        # Validate file is readable
+        if not os.access(request.file_path, os.R_OK):
+            logger.error(f"File not readable: {request.file_path}")
+            raise HTTPException(status_code=403, detail=f"File not readable: {request.file_path}")
+
+        file_size = os.path.getsize(request.file_path)
+        file_name = os.path.basename(request.file_path)
+        logger.info(f"Processing file - Name: {file_name}, Size: {file_size} bytes")
+
+        # DEBUG MODE: Run pipeline inspector if debug=True
+        debug_files = None
+        if request.debug:
+            logger.info(f"Debug mode enabled - Running pipeline stage inspector")
+            from pipeline_stage_inspector import PipelineStageInspector
+            inspector = PipelineStageInspector(output_dir="pipeline_debug")
+            debug_files = inspector.inspect_pipeline(request.file_path)
+            logger.info(f"Debug files created: {len(debug_files)} files in pipeline_debug/")
+
+        # Process document using the full pipeline
+        logger.info(f"Starting document processing pipeline for: {file_name}")
+        result = service.process_document(
+            file_path=request.file_path,
+            project_id=request.project_id
+        )
+        logger.info(f"Document processing pipeline completed for: {file_name}")
+
+        if not result.success:
+            logger.error(
+                f"Document processing failed - Filename: {file_name}, "
+                f"Error: {result.error_message}"
+            )
+
+            # Send failure callback if provided
+            if request.callback_url:
+                await _send_callback(request.callback_url, {
+                    "success": False,
+                    "doc_id": result.doc_id,
+                    "project_id": request.project_id,
+                    "error": result.error_message
+                })
+
+            raise HTTPException(
+                status_code=500,
+                detail=f"Processing failed: {result.error_message}"
+            )
+
+        duration = time.time() - start_time
+        logger.info(
+            f"Document processed successfully - Filename: {file_name}, "
+            f"Doc ID: {result.doc_id}, Pages: {result.pages_extracted}, "
+            f"Chunks: {result.chunks_created}, Unique: {result.unique_chunks}, "
+            f"Vectors: {result.vectors_stored}, Vector IDs: {len(result.vector_ids)}, "
+            f"Pipeline time: {result.total_time:.2f}s, Total time: {duration:.2f}s"
+        )
+
+        response = {
+            "message": "Document processed successfully",
+            "doc_id": result.doc_id,
+            "project_id": request.project_id,
+            "file_name": file_name,
+            "file_path": request.file_path,
+            "pages_extracted": result.pages_extracted,
+            "chunks_created": result.chunks_created,
+            "unique_chunks": result.unique_chunks,
+            "vectors_stored": result.vectors_stored,
+            "vector_ids": result.vector_ids,  # For Base Model tracking
+            "embedding_ids": result.embedding_ids,  # Alias
+            "total_time": result.total_time
+        }
+
+        # Add debug files to response if debug mode was enabled
+        if request.debug and debug_files:
+            response["debug"] = {
+                "enabled": True,
+                "output_dir": "pipeline_debug",
+                "files_created": debug_files
+            }
+
+        # Send success callback if provided
+        if request.callback_url:
+            await _send_callback(request.callback_url, response)
+            response["callback_sent"] = True
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        duration = time.time() - start_time
+        logger.error(
+            f"Unexpected error during path-based processing - Path: {request.file_path}, "
+            f"Duration: {duration:.2f}s, Error: {str(e)}",
+            exc_info=True
+        )
+
+        # Send error callback if provided
+        if request.callback_url:
+            await _send_callback(request.callback_url, {
+                "success": False,
+                "file_path": request.file_path,
+                "project_id": request.project_id,
+                "error": str(e)
+            })
+
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Helper function for sending callbacks
+async def _send_callback(callback_url: str, payload: dict):
+    """Send async callback to Base Model."""
+    import httpx
+    try:
+        logger.info(f"Sending callback to: {callback_url}")
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(callback_url, json=payload)
+            logger.info(f"Callback sent - Status: {response.status_code}")
+    except Exception as e:
+        logger.error(f"Failed to send callback to {callback_url}: {str(e)}", exc_info=True)
+
+
+# ---------------------------------------------------------
 # 2️⃣ VECTOR SEARCH ENDPOINT
 # ---------------------------------------------------------
 @app.get("/search", response_model=List[SearchResponse])
 def search_documents(
     q: str = Query(..., description="Search query text"),
     limit: int = 10,
-    score_threshold: Optional[float] = None
+    score_threshold: Optional[float] = None,
+    expand_to_section: bool = Query(False, description="Expand matched chunks to include full section context using heading_path"),
+    project_id: Optional[str] = Query(None, description="Filter results by project ID (multi-tenancy)")
 ):
     """
     Semantic search through Qdrant embeddings
+
+    Args:
+        q: Search query text
+        limit: Maximum number of results
+        score_threshold: Minimum similarity score threshold
+        expand_to_section: If True, retrieves complete sections instead of individual chunks.
+                          Uses heading_path metadata to fetch all chunks in the same section,
+                          preventing context fragmentation (Parent-Child Retrieval).
+        project_id: Optional project ID to filter results (only returns documents from this project)
+
+    Multi-Tenancy:
+        When project_id is provided, only documents tagged with that project_id will be returned.
+        This ensures data isolation between different projects/users.
     """
     start_time = time.time()
     logger.info(
         f"Search request received - Query: '{q[:100]}{'...' if len(q) > 100 else ''}', "
-        f"Limit: {limit}, Score threshold: {score_threshold}"
+        f"Limit: {limit}, Score threshold: {score_threshold}, Expand to section: {expand_to_section}, "
+        f"Project ID: {project_id}"
     )
 
     try:
+        # Build filters with project_id if provided
+        filters = {}
+        if project_id:
+            filters['project_id'] = project_id
+            logger.debug(f"Filtering results by project_id: {project_id}")
+
         logger.debug(f"Executing search with query: {q}")
         results = service.search(
             query=q,
             limit=limit,
-            score_threshold=score_threshold
+            score_threshold=score_threshold,
+            expand_to_section=expand_to_section,
+            filters=filters if filters else None
         )
         logger.debug(f"Search returned {len(results)} results")
 
@@ -371,6 +583,8 @@ def search_documents(
                 "score": r.get("score"),
                 "text": r.get("payload", {}).get("text"),
                 "metadata": r.get("payload", {}),
+                "matched_chunk": r.get("matched_chunk", True),
+                "section_expansion": r.get("section_expansion", False)
             }
             for r in results
         ]
@@ -398,7 +612,10 @@ def search_documents(
 # 3️⃣ FILTERED SEMANTIC SEARCH
 # ---------------------------------------------------------
 @app.post("/search/filtered", response_model=List[SearchResponse])
-def filtered_search(request: FilterSearchRequest):
+def filtered_search(
+    request: FilterSearchRequest,
+    project_id: Optional[str] = Query(None, description="Filter results by project ID (multi-tenancy)")
+):
     """
     Semantic search with metadata filtering.
 
@@ -410,19 +627,35 @@ def filtered_search(request: FilterSearchRequest):
     - By content type: {"contains_code": True, "contains_tables": False}
     - By section: {"section_title": "Introduction"}
     - Combined: {"doc_id": "doc-123", "page_start": {"gte": 1}, "contains_code": True}
+
+    Parent-Child Retrieval:
+    - Set expand_to_section=True to retrieve complete sections instead of fragments
+    - Uses heading_path to fetch all chunks in the same section
+
+    Multi-Tenancy:
+    - Provide project_id to filter results by project (data isolation)
+    - project_id can also be included in the filters dictionary
     """
     start_time = time.time()
     logger.info(
         f"Filtered search request - Query: '{request.query[:50]}', "
-        f"Filters: {request.filters}, Limit: {request.limit}"
+        f"Filters: {request.filters}, Limit: {request.limit}, "
+        f"Expand to section: {request.expand_to_section}, Project ID: {project_id}"
     )
 
     try:
+        # Merge project_id into filters if provided
+        merged_filters = request.filters.copy() if request.filters else {}
+        if project_id:
+            merged_filters['project_id'] = project_id
+            logger.debug(f"Added project_id to filters: {project_id}")
+
         results = service.search(
             query=request.query,
             limit=request.limit,
-            filters=request.filters,
-            score_threshold=request.score_threshold
+            filters=merged_filters if merged_filters else None,
+            score_threshold=request.score_threshold,
+            expand_to_section=request.expand_to_section
         )
 
         formatted = [
@@ -431,6 +664,8 @@ def filtered_search(request: FilterSearchRequest):
                 "score": r.get("score"),
                 "text": r.get("payload", {}).get("text"),
                 "metadata": r.get("payload", {}),
+                "matched_chunk": r.get("matched_chunk", True),
+                "section_expansion": r.get("section_expansion", False)
             }
             for r in results
         ]
@@ -539,7 +774,10 @@ def get_stats():
 # 6️⃣ LIST ALL DOCUMENTS
 # ---------------------------------------------------------
 @app.get("/documents", response_model=List[DocumentResponse])
-def list_documents(limit: int = Query(1000, ge=1, le=10000, description="Maximum documents to return")):
+def list_documents(
+    limit: int = Query(1000, ge=1, le=10000, description="Maximum documents to return"),
+    project_id: Optional[str] = Query(None, description="Filter documents by project ID")
+):
     """
     List all documents stored in the vector database.
 
@@ -550,6 +788,9 @@ def list_documents(limit: int = Query(1000, ge=1, le=10000, description="Maximum
     - Total pages
     - Whether document has a summary
     - Creation timestamp
+
+    Multi-Tenancy:
+    - Provide project_id to only list documents from a specific project
 
     Example response:
     ```json
@@ -567,10 +808,45 @@ def list_documents(limit: int = Query(1000, ge=1, le=10000, description="Maximum
     ```
     """
     start_time = time.time()
-    logger.info(f"List documents request received - Limit: {limit}")
+    logger.info(f"List documents request received - Limit: {limit}, Project ID: {project_id}")
 
     try:
-        documents = document_lister.list_documents(limit=limit)
+        # If project_id is provided, filter documents by project
+        if project_id:
+            logger.debug(f"Filtering documents by project_id: {project_id}")
+            # Get all chunks from this project
+            chunks = service.filter_by_metadata(
+                filters={'project_id': project_id},
+                limit=limit * 100  # Higher limit to get all chunks
+            )
+
+            # Group by doc_id to get unique documents
+            doc_map = {}
+            for chunk in chunks:
+                payload = chunk.get('payload', {})
+                doc_id = payload.get('doc_id')
+                if doc_id and doc_id not in doc_map:
+                    doc_map[doc_id] = payload
+
+            # Format as DocumentResponse
+            documents = []
+            for doc_id, first_chunk in doc_map.items():
+                # Get chunk count for this document
+                doc_chunks = [c for c in chunks if c.get('payload', {}).get('doc_id') == doc_id]
+                documents.append({
+                    'doc_id': doc_id,
+                    'file_name': first_chunk.get('file_name', 'Unknown'),
+                    'total_chunks': len(doc_chunks),
+                    'total_pages': max((c.get('payload', {}).get('page_end', 0) for c in doc_chunks), default=0),
+                    'has_summary': any(c.get('payload', {}).get('section_title') == '[DOCUMENT SUMMARY]' for c in doc_chunks),
+                    'created_at': first_chunk.get('created_at', ''),
+                    'version': first_chunk.get('version', '1.0')
+                })
+
+            documents = documents[:limit]  # Apply limit
+        else:
+            # No project filter - list all documents
+            documents = document_lister.list_documents(limit=limit)
 
         duration = time.time() - start_time
         logger.info(

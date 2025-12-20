@@ -92,6 +92,10 @@ class ProcessingResult:
     has_summary: bool = False
     summary_length: int = 0
 
+    # Vector IDs (for Base Model tracking and deletion)
+    vector_ids: List[str] = field(default_factory=list)
+    embedding_ids: List[str] = field(default_factory=list)  # Alias for vector_ids
+
     # Processing time
     extraction_time: float = 0.0
     normalization_time: float = 0.0
@@ -120,6 +124,8 @@ class ProcessingResult:
                 'has_summary': self.has_summary,
                 'summary_length': self.summary_length,
             },
+            'vector_ids': self.vector_ids,  # For Base Model tracking
+            'embedding_ids': self.embedding_ids,  # Alias
             'timing': {
                 'extraction_time': f"{self.extraction_time:.2f}s",
                 'normalization_time': f"{self.normalization_time:.2f}s",
@@ -213,6 +219,7 @@ class DocumentToVectorService:
         self,
         file_path: str,
         doc_id: Optional[str] = None,
+        project_id: Optional[str] = None,
         custom_metadata: Optional[Dict] = None
     ) -> ProcessingResult:
         """
@@ -221,6 +228,7 @@ class DocumentToVectorService:
         Args:
             file_path: Path to document file
             doc_id: Optional document ID (generated if not provided)
+            project_id: Optional project ID for multi-tenancy/data isolation
             custom_metadata: Optional custom metadata to attach
 
         Returns:
@@ -234,7 +242,10 @@ class DocumentToVectorService:
             logger.debug(f"Generated doc_id: {doc_id}")
 
         file_name = Path(file_path).name
-        logger.info(f"[{doc_id}] Starting document processing pipeline for: {file_name}")
+
+        # Log with project_id context if provided
+        project_context = f"[Project: {project_id}] " if project_id else ""
+        logger.info(f"{project_context}[{doc_id}] Starting document processing pipeline for: {file_name}")
 
         result = ProcessingResult(
             success=False,
@@ -404,10 +415,27 @@ class DocumentToVectorService:
             logger.info(f"[{doc_id}] Stage 5/5: Storing in Qdrant...")
             stage_start = time.time()
 
+            # Prepare metadata to inject into all chunks
+            metadata_to_inject = {}
+
+            # Add project_id if provided (for multi-tenancy)
+            if project_id:
+                metadata_to_inject['project_id'] = project_id
+                logger.info(f"[{doc_id}] Tagging all chunks with project_id: {project_id}")
+
             # Add custom metadata if provided
             if custom_metadata:
+                metadata_to_inject.update(custom_metadata)
+
+            # Inject metadata into all embedding records
+            if metadata_to_inject:
                 for record in embedding_records:
-                    record.embedding_metadata.update(custom_metadata)
+                    record.embedding_metadata.update(metadata_to_inject)
+                logger.debug(f"[{doc_id}] Injected metadata into {len(embedding_records)} records")
+
+            # Collect all embedding_ids for Base Model tracking
+            vector_ids = [record.embedding_id for record in embedding_records]
+            logger.info(f"[{doc_id}] Collected {len(vector_ids)} vector IDs for tracking")
 
             upload_stats = self.storage.store_embeddings(
                 embedding_records,
@@ -416,9 +444,12 @@ class DocumentToVectorService:
             )
 
             result.vectors_stored = upload_stats['uploaded']
+            result.vector_ids = vector_ids
+            result.embedding_ids = vector_ids  # Alias
             result.storage_time = time.time() - stage_start
 
             logger.info(f"[{doc_id}] ✅ Stored {result.vectors_stored} vectors in {result.storage_time:.2f}s")
+            logger.debug(f"[{doc_id}] Vector IDs: {vector_ids[:5]}..." if len(vector_ids) > 5 else f"[{doc_id}] Vector IDs: {vector_ids}")
 
             # ================================================================
             # SUCCESS
@@ -505,7 +536,8 @@ class DocumentToVectorService:
         query: str,
         limit: int = 10,
         filters: Optional[Dict] = None,
-        score_threshold: Optional[float] = None
+        score_threshold: Optional[float] = None,
+        expand_to_section: bool = False
     ) -> List[Dict]:
         """
         Search for documents.
@@ -515,6 +547,7 @@ class DocumentToVectorService:
             limit: Number of results
             filters: Optional metadata filters
             score_threshold: Minimum similarity score
+            expand_to_section: If True, expands matched chunks to include all chunks from the same section using heading_path
 
         Returns:
             List of search results
@@ -530,7 +563,85 @@ class DocumentToVectorService:
             score_threshold=score_threshold
         )
 
+        # Expand to full sections if requested
+        if expand_to_section and results:
+            results = self._expand_to_full_sections(results)
+
         return results
+
+    def _expand_to_full_sections(self, initial_results: List[Dict]) -> List[Dict]:
+        """
+        Expand matched chunks to include all chunks from the same section.
+
+        Uses heading_path to identify and fetch all sibling chunks in the same section,
+        providing complete context instead of fragmented chunks.
+
+        Args:
+            initial_results: Initial search results with matched chunks
+
+        Returns:
+            Expanded results with full sections
+        """
+        logger.info(f"Expanding {len(initial_results)} matched chunks to full sections")
+
+        # Track which sections we've already fetched to avoid duplicates
+        seen_sections = set()
+        expanded_results = []
+
+        for result in initial_results:
+            payload = result.get('payload', {})
+            heading_path = payload.get('heading_path', [])
+            doc_id = payload.get('doc_id')
+
+            # Create a unique identifier for this section
+            section_key = (doc_id, tuple(heading_path)) if heading_path else None
+
+            # If we've already processed this section, skip
+            if section_key and section_key in seen_sections:
+                logger.debug(f"Section already expanded: {' > '.join(heading_path)}")
+                continue
+
+            if section_key:
+                seen_sections.add(section_key)
+
+            # Fetch all chunks with the same heading_path
+            if heading_path:
+                heading_path_str = ' > '.join(heading_path)
+                logger.debug(f"Fetching full section for: {heading_path_str}")
+
+                # Build filter to get all chunks in this section
+                section_filter = {
+                    'doc_id': doc_id,
+                    'heading_path_str': heading_path_str
+                }
+
+                # Fetch all chunks in this section
+                section_chunks = self.storage.filter_by_metadata(
+                    filters=section_filter,
+                    limit=1000  # High limit to get all chunks in section
+                )
+
+                logger.info(f"Expanded 1 match to {len(section_chunks)} chunks in section: {heading_path_str}")
+
+                # Add all section chunks with the original match score for context
+                for chunk in section_chunks:
+                    expanded_result = {
+                        'id': chunk.get('id'),
+                        'score': result.get('score'),  # Preserve original match score
+                        'payload': chunk.get('payload'),
+                        'matched_chunk': chunk.get('payload', {}).get('chunk_id') == payload.get('chunk_id'),  # Mark which was the original match
+                        'section_expansion': True  # Flag to indicate this is part of section expansion
+                    }
+                    expanded_results.append(expanded_result)
+            else:
+                # No heading_path, just add the original result
+                logger.debug("No heading_path found, adding original result")
+                result['section_expansion'] = False
+                result['matched_chunk'] = True
+                expanded_results.append(result)
+
+        logger.info(f"Expansion complete: {len(initial_results)} matches → {len(expanded_results)} chunks")
+        return expanded_results
 
     def filter_by_metadata(
         self,

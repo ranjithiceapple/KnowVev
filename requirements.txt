@@ -3,6 +3,7 @@
 # ---------------------------
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
+httpx==0.25.2  # For async HTTP callbacks
 
 # ---------------------------
 # Vector Database
