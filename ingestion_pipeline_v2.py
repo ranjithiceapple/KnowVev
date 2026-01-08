@@ -28,6 +28,10 @@ from page_section_model import PhysicalLocation, LogicalSection, ChunkMetadata a
 # Existing components
 from document_processor_llm import extract_text_from_document
 from qdrant_storage import QdrantStorage, QdrantConfig
+from topic_modeling_service import TopicModelManager, TopicConfig
+from logger_config import get_logger
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -40,6 +44,11 @@ class PipelineConfig:
     # Qdrant
     qdrant_url: str = "http://localhost:6333"
     qdrant_collection: str = "documents_v2"
+
+    # Topic Modeling
+    enable_topic_modeling: bool = True
+    topic_n_topics: int = 10
+    topic_model_dir: str = "./topic_models"
 
     # Artifacts
     artifact_dir: str = "./artifacts"
@@ -59,6 +68,18 @@ class IngestionPipelineV2:
         ))
         # Ensure collection exists
         self.qdrant.collection_manager.create_collection(recreate=False)
+
+        # Initialize topic modeling
+        if self.config.enable_topic_modeling:
+            topic_config = TopicConfig(
+                enabled=True,
+                n_topics=self.config.topic_n_topics,
+                model_dir=self.config.topic_model_dir
+            )
+            self.topic_manager = TopicModelManager(topic_config, self.qdrant)
+            logger.info("Topic modeling enabled")
+        else:
+            self.topic_manager = None
 
     def ingest_document(self, file_path: str) -> str:
         """
@@ -215,6 +236,28 @@ class IngestionPipelineV2:
                     'boundary_reason': chunk.start_boundary.reason.value
                 }
             })
+
+        # Assign topics before storing
+        if self.topic_manager:
+            try:
+                texts = [c.text for c in chunks]
+                doc_topic, chunk_topics = self.topic_manager.assign_topics_hybrid(chunks=chunks, embeddings_text=texts)
+
+                for i, point in enumerate(points):
+                    if i < len(chunk_topics):
+                        point['payload']['topic'] = {
+                            'topic_id': chunk_topics[i].topic_id,
+                            'topic_label': chunk_topics[i].topic_label,
+                            'confidence': chunk_topics[i].confidence,
+                            'keywords': chunk_topics[i].keywords
+                        }
+                        point['payload']['document_topic'] = {
+                            'topic_id': doc_topic.topic_id,
+                            'topic_label': doc_topic.topic_label
+                        }
+                logger.info(f"Topics assigned: doc={doc_topic.topic_label}")
+            except Exception as e:
+                logger.error(f"Topic assignment failed: {e}")
 
         self.qdrant.upsert_points(points)
 
