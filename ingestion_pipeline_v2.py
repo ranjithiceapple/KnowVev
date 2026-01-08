@@ -57,6 +57,8 @@ class IngestionPipelineV2:
             url=self.config.qdrant_url,
             collection_name=self.config.qdrant_collection
         ))
+        # Ensure collection exists
+        self.qdrant.collection_manager.create_collection(recreate=False)
 
     def ingest_document(self, file_path: str) -> str:
         """
