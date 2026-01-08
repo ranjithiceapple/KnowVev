@@ -1,0 +1,26 @@
+{
+  "version": "v20260108_124835",
+  "created_at": "2026-01-08T12:48:35.022646",
+  "n_topics": 10,
+  "n_documents": 1,
+  "n_training_samples": 166,
+  "model_params": {
+    "max_features": 5000,
+    "min_df": 2,
+    "max_df": 0.85,
+    "nmf_init": "nndsvd",
+    "nmf_solver": "cd"
+  },
+  "topic_labels": {
+    "0": "",
+    "1": "",
+    "2": "",
+    "3": "",
+    "4": "",
+    "5": "",
+    "6": "",
+    "7": "",
+    "8": "",
+    "9": ""
+  }
+}
