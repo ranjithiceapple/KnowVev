@@ -169,7 +169,7 @@ class ContentBlock:
 @dataclass
 class Heading(ContentBlock):
     """Heading block with hierarchical level"""
-    level: HeadingLevel
+    level: HeadingLevel = HeadingLevel.H1
 
     # Section hierarchy (built by DocumentIR builder)
     section_path: List[str] = field(default_factory=list)  # ["Chapter 1", "Section 1.1", ...]
