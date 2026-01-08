@@ -218,8 +218,8 @@ class Table(ContentBlock):
     Table representation - stores structured data, NOT markdown
     """
     # Structured table data
-    headers: List[str]  # Column headers
-    rows: List[List[str]]  # Each row is a list of cell values
+    headers: List[str] = field(default_factory=list)  # Column headers
+    rows: List[List[str]] = field(default_factory=list)  # Each row is a list of cell values
 
     # Optional: cell-level metadata
     cell_metadata: Optional[List[List[Dict[str, Any]]]] = None
@@ -341,8 +341,8 @@ class ListBlock(ContentBlock):
     """
     List representation - stores structure, not markdown
     """
-    list_type: ListType
-    items: List[str]  # List items as plain text
+    list_type: ListType = ListType.UNORDERED
+    items: List[str] = field(default_factory=list)  # List items as plain text
 
     # For nested lists
     nested_lists: Optional[List['ListBlock']] = None
