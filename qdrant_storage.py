@@ -300,9 +300,9 @@ class QdrantStorage:
 
         point_structs = [
             PointStruct(
-                id=p['id'],
+                id=str(uuid.uuid5(uuid.NAMESPACE_DNS, p['id'])),
                 vector=p['vector'],
-                payload=p['payload']
+                payload={**p['payload'], 'original_id': p['id']}
             )
             for p in points
         ]
@@ -470,10 +470,11 @@ class QdrantStorage:
     def update_metadata(self, point_id: str, metadata: Dict):
         logger.info(f"Updating metadata for point '{point_id}' - Fields: {list(metadata.keys())}")
         try:
+            qdrant_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, point_id))
             self.client.set_payload(
                 collection_name=self.config.collection_name,
                 payload=metadata,
-                points=[point_id]
+                points=[qdrant_id]
             )
             logger.info(f"Metadata updated successfully for point '{point_id}'")
         except Exception as e:
@@ -500,9 +501,10 @@ class QdrantStorage:
     def get_by_id(self, point_id: str):
         logger.debug(f"Retrieving point by ID: {point_id}")
         try:
+            qdrant_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, point_id))
             results = self.client.retrieve(
                 collection_name=self.config.collection_name,
-                ids=[point_id],
+                ids=[qdrant_id],
                 with_vectors=True,
                 with_payload=True
             )
