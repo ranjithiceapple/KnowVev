@@ -105,6 +105,8 @@ app.add_middleware(
 logger.info(f"CORS middleware configured - Origins: {cors_origins}")
 
 
+
+
 # Request logging middleware
 @app.middleware("http")
 async def log_requests(request, call_next):
@@ -235,10 +237,15 @@ class SearchWithIntentResponse(BaseModel):
 # ROUTES
 # ---------------------------------------------------------
 
+@app.get("/health")
+def health():
+    return {"status": "healthy"}
+
+
 @app.get("/")
 def root():
     logger.debug("Root endpoint accessed")
-    return {"message": "KnowVec RAG Pipeline API is running 🚀"}
+    return {"message": "KnowVec RAG Pipeline API is running 🚀 booooooooo"}
 
 
 # ---------------------------------------------------------

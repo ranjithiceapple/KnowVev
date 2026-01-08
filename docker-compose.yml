@@ -29,8 +29,9 @@ services:
     ports:
       - "8007:8007"
     volumes:
-      - ./data:/app/data  # For persistent data storage
-      - ./logs:/app/logs  # For log files
+      - /workspace/ranjith/ia_docs/ia-docs/data:/app/data
+      - /home/ranjith/workspaces/KnowVec/KnowVev/logs:/app/logs
+
     env_file:
       - .env  # Load all environment variables from .env file
     extra_hosts:

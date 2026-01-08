@@ -1,5 +1,5 @@
-# KnowVec RAG Pipeline - Dockerfile
-FROM python:3.10-slim
+# KnowVec RAG Pipeline - Dockerfile (GPU-enabled)
+FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04
 
 # Set working directory
 WORKDIR /app
@@ -8,22 +8,30 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies
+# Install system dependencies including Python 3.10
 RUN apt-get update && apt-get install -y \
+    python3.10 \
+    python3.10-dev \
+    python3-pip \
     build-essential \
     curl \
+    git \
     && rm -rf /var/lib/apt/lists/*
+
+# Create symlinks for python
+RUN ln -sf /usr/bin/python3.10 /usr/bin/python && \
+    ln -sf /usr/bin/python3.10 /usr/bin/python3
+
+# Upgrade pip
+RUN python -m pip install --upgrade pip setuptools wheel
 
 # Copy requirements first (for layer caching)
 COPY requirements.txt .
 
 # Install Python dependencies
-# Install torch CPU-only version first (smaller size)
-RUN pip install torch==2.2.0 --index-url https://download.pytorch.org/whl/cpu
-
-# Install other requirements
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code

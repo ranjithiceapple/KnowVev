@@ -6,3 +6,6 @@ __pycache__/
 *.log
 logs/*
 !logs/knowvec.logs   # explicitly tracked
+
+# VENV
+know_venv

@@ -1,45 +1,25 @@
-# ---------------------------
-# Web Framework
-# ---------------------------
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-httpx==0.25.2  # For async HTTP callbacks
+# PyTorch
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.9.1
+torchvision==0.24.1
+torchaudio==2.9.1
 
-# ---------------------------
-# Vector Database
-# ---------------------------
-qdrant-client==1.7.0
-grpcio==1.60.0
-grpcio-tools==1.60.0
+# marker-pdf (OCR runtime-disabled)
+marker-pdf==1.10.1
+pymupdf4llm==0.2.8
 
-# ---------------------------
-# Machine Learning / Embeddings
-# ---------------------------
-sentence-transformers==2.3.1
-transformers==4.36.2
-tokenizers==0.15.0
-huggingface-hub==0.20.3
+numpy==1.26.4
+pillow>=10.4.0,<11.0.0
+pydantic>=2.7.0
 
-# IMPORTANT: torch is optional in requirements because it's HUGE.
-# Install the CPU-only wheel at runtime or include:
-torch==2.2.0 --index-url https://download.pytorch.org/whl/cpu
-# If Docker image fails to install torch, I will adjust Dockerfile for you.
-
-# ---------------------------
-# Document Processing
-# ---------------------------
-PyMuPDF==1.23.7
+pdfplumber==0.11.9
 python-docx==1.1.0
-python-multipart==0.0.6
+python-pptx==1.0.2
 
-# ---------------------------
-# Data / Helpers
-# ---------------------------
-numpy==1.24.3
-pydantic==2.5.0
-typing_extensions==4.9.0
-
-# ---------------------------
-# Environment Configuration
-# ---------------------------
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+python-multipart>=0.0.18
+qdrant-client==1.12.0
 python-dotenv==1.0.0
+
+pandas==2.2.2

@@ -17,7 +17,7 @@ import time
 from logger_config import get_logger
 
 # Import pipeline components
-from document_processor import extract_text_from_document
+from document_processor_llm import extract_text_from_document
 from metadata_aware_normalizer import normalize_with_metadata, NormalizationConfig
 from enterprise_chunking_pipeline import chunk_with_normalization, ChunkingConfig
 from embedding_preparation import prepare_for_embedding
