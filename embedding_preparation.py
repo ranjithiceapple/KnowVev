@@ -140,6 +140,14 @@ class EmbeddingRecord:
             'version': self.version,
             'created_at': self.created_at,
             'pipeline': self.processing_pipeline,
+
+            # Topic modeling fields (NEW)
+            'topic_id': self.embedding_metadata.get('topic', {}).get('topic_id'),
+            'topic_label': self.embedding_metadata.get('topic', {}).get('topic_label', ''),
+            'topic_confidence': self.embedding_metadata.get('topic', {}).get('confidence', 0.0),
+            'topic_keywords': self.embedding_metadata.get('topic', {}).get('keywords', []),
+            'document_topic_id': self.embedding_metadata.get('document_topic', {}).get('topic_id'),
+            'document_topic_label': self.embedding_metadata.get('document_topic', {}).get('topic_label', ''),
         }
 
         # Add project_id as top-level field for efficient filtering (multi-tenancy)

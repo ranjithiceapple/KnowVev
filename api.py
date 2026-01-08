@@ -59,6 +59,11 @@ service_config = ServiceConfig(
     generate_document_summary=config.generate_document_summary,
     summary_max_length=config.summary_max_length,
     summary_method=config.summary_method,
+    # Topic modeling settings
+    enable_topic_modeling=config.enable_topic_modeling,
+    topic_n_topics=config.topic_n_topics,
+    topic_model_dir=config.topic_model_dir,
+    topic_retrain_threshold=config.topic_retrain_threshold_docs,
 )
 logger.info(f"Service config created - Collection: {service_config.qdrant_collection}, Vector size: {service_config.vector_size}")
 
@@ -1429,6 +1434,386 @@ def bulk_delete_documents(doc_ids: List[str] = Body(..., description="List of do
 #             exc_info=True
 #         )
 #         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------
+# TOPIC MODELING ENDPOINTS
+# ---------------------------------------------------------
+
+@app.get("/topics")
+def list_topics():
+    """
+    Get all topics from the current global topic model.
+
+    Returns comprehensive information about each topic including:
+    - Topic ID and label
+    - Top keywords
+    - Document and chunk counts
+
+    Example response:
+    ```json
+    {
+        "total_topics": 10,
+        "model_info": {
+            "is_trained": true,
+            "n_topics": 10,
+            "n_features": 5000
+        },
+        "topics": [
+            {
+                "id": 0,
+                "label": "Machine Learning",
+                "keywords": ["neural", "training", "model", "algorithm"],
+                "document_count": 23,
+                "chunk_count": 145
+            }
+        ]
+    }
+    ```
+    """
+    start_time = time.time()
+    logger.info("List topics request received")
+
+    try:
+        # Check if topic modeling is enabled
+        if not service.config.enable_topic_modeling:
+            raise HTTPException(
+                status_code=400,
+                detail="Topic modeling is not enabled. Set ENABLE_TOPIC_MODELING=true in .env"
+            )
+
+        # Get topic model stats
+        topic_stats = service.topic_manager.get_topic_stats()
+
+        if not topic_stats.get('model_exists'):
+            return {
+                "total_topics": 0,
+                "model_info": {},
+                "topics": [],
+                "message": "No topic model exists yet. Process some documents first."
+            }
+
+        model_info = topic_stats['model_info']
+        topic_labels = model_info.get('topic_labels', {})
+
+        # Count documents and chunks per topic
+        topics = []
+        for topic_id, label in topic_labels.items():
+            # Count chunks with this topic
+            chunks_with_topic = service.filter_by_metadata(
+                filters={'topic_id': topic_id},
+                limit=10000  # High limit to count all
+            )
+
+            # Get unique documents
+            doc_ids = set()
+            for chunk in chunks_with_topic:
+                doc_id = chunk.get('payload', {}).get('doc_id')
+                if doc_id:
+                    doc_ids.add(doc_id)
+
+            # Get keywords from first chunk (they're all the same for a topic)
+            keywords = []
+            if chunks_with_topic:
+                keywords = chunks_with_topic[0].get('payload', {}).get('topic_keywords', [])
+
+            topics.append({
+                'id': topic_id,
+                'label': label,
+                'keywords': keywords[:10],  # Top 10 keywords
+                'document_count': len(doc_ids),
+                'chunk_count': len(chunks_with_topic)
+            })
+
+        duration = time.time() - start_time
+        logger.info(f"List topics completed - Topics: {len(topics)}, Duration: {duration:.3f}s")
+
+        return {
+            'total_topics': len(topics),
+            'model_info': {
+                'is_trained': model_info.get('is_trained'),
+                'n_topics': model_info.get('n_topics'),
+                'n_features': model_info.get('n_features'),
+                'reconstruction_error': model_info.get('reconstruction_error')
+            },
+            'topics': topics
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        duration = time.time() - start_time
+        logger.error(f"List topics failed - Duration: {duration:.3f}s, Error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/topics/{topic_id}/search")
+def search_by_topic(
+    topic_id: int,
+    limit: int = Query(10, ge=1, le=100, description="Maximum number of results"),
+    min_confidence: float = Query(0.5, ge=0.0, le=1.0, description="Minimum topic confidence")
+):
+    """
+    Find chunks and documents assigned to a specific topic.
+
+    Filters results by topic_id and minimum confidence threshold.
+
+    Args:
+        topic_id: Topic ID to search for
+        limit: Maximum number of results
+        min_confidence: Minimum topic confidence (0.0-1.0)
+
+    Example response:
+    ```json
+    {
+        "topic_id": 3,
+        "topic_label": "Machine Learning",
+        "results": [
+            {
+                "id": "chunk-123",
+                "text": "Neural networks are...",
+                "confidence": 0.85,
+                "metadata": {...}
+            }
+        ],
+        "total_results": 15
+    }
+    ```
+    """
+    start_time = time.time()
+    logger.info(f"Search by topic request - Topic ID: {topic_id}, Limit: {limit}, Min confidence: {min_confidence}")
+
+    try:
+        # Check if topic modeling is enabled
+        if not service.config.enable_topic_modeling:
+            raise HTTPException(
+                status_code=400,
+                detail="Topic modeling is not enabled"
+            )
+
+        # Filter by topic ID and confidence
+        results = service.filter_by_metadata(
+            filters={
+                'topic_id': topic_id,
+                'topic_confidence': {'$gte': min_confidence}
+            },
+            limit=limit
+        )
+
+        # Get topic label from first result
+        topic_label = "Unknown"
+        if results:
+            topic_label = results[0].get('payload', {}).get('topic_label', 'Unknown')
+
+        # Format results
+        formatted = []
+        for r in results:
+            payload = r.get('payload', {})
+            formatted.append({
+                'id': str(payload.get('chunk_id')),
+                'text': payload.get('text'),
+                'confidence': payload.get('topic_confidence', 0.0),
+                'metadata': payload
+            })
+
+        duration = time.time() - start_time
+        logger.info(
+            f"Search by topic completed - Topic ID: {topic_id}, "
+            f"Results: {len(formatted)}, Duration: {duration:.3f}s"
+        )
+
+        return {
+            'topic_id': topic_id,
+            'topic_label': topic_label,
+            'results': formatted,
+            'total_results': len(formatted)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        duration = time.time() - start_time
+        logger.error(
+            f"Search by topic failed - Duration: {duration:.3f}s, Error: {str(e)}",
+            exc_info=True
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/documents/{doc_id}/topics")
+def get_document_topics(doc_id: str):
+    """
+    Get topic analysis for a specific document.
+
+    Returns both document-level and chunk-level topic assignments.
+
+    Args:
+        doc_id: Document ID
+
+    Example response:
+    ```json
+    {
+        "doc_id": "abc-123-xyz",
+        "file_name": "report.pdf",
+        "document_topic": {
+            "id": 2,
+            "label": "AI & Machine Learning"
+        },
+        "chunk_topics": [
+            {
+                "chunk_id": "chunk-1",
+                "chunk_index": 0,
+                "topic_id": 2,
+                "topic_label": "AI & Machine Learning",
+                "confidence": 0.85,
+                "keywords": ["neural", "training", "model"]
+            }
+        ],
+        "topic_distribution": {
+            "0": 5,
+            "1": 2,
+            "2": 38
+        }
+    }
+    ```
+    """
+    start_time = time.time()
+    logger.info(f"Get document topics request - Doc ID: {doc_id[:8]}...")
+
+    try:
+        # Check if topic modeling is enabled
+        if not service.config.enable_topic_modeling:
+            raise HTTPException(
+                status_code=400,
+                detail="Topic modeling is not enabled"
+            )
+
+        # Get all chunks for document
+        chunks = service.filter_by_metadata(
+            filters={'doc_id': doc_id},
+            limit=10000
+        )
+
+        if not chunks:
+            raise HTTPException(status_code=404, detail=f"Document not found: {doc_id}")
+
+        # Extract document-level topic from first chunk
+        first_chunk = chunks[0].get('payload', {})
+        document_topic = {
+            'id': first_chunk.get('document_topic_id'),
+            'label': first_chunk.get('document_topic_label', 'Unknown')
+        }
+
+        # Extract chunk-level topics
+        chunk_topics = []
+        topic_counts = {}
+
+        for chunk in chunks:
+            payload = chunk.get('payload', {})
+            topic_id = payload.get('topic_id')
+
+            chunk_topics.append({
+                'chunk_id': payload.get('chunk_id'),
+                'chunk_index': payload.get('chunk_index', 0),
+                'topic_id': topic_id,
+                'topic_label': payload.get('topic_label', 'Unknown'),
+                'confidence': payload.get('topic_confidence', 0.0),
+                'keywords': payload.get('topic_keywords', [])
+            })
+
+            # Count topic distribution
+            if topic_id is not None:
+                topic_counts[topic_id] = topic_counts.get(topic_id, 0) + 1
+
+        duration = time.time() - start_time
+        logger.info(
+            f"Get document topics completed - Chunks: {len(chunk_topics)}, Duration: {duration:.3f}s"
+        )
+
+        return {
+            'doc_id': doc_id,
+            'file_name': first_chunk.get('file_name', 'Unknown'),
+            'document_topic': document_topic,
+            'chunk_topics': chunk_topics,
+            'topic_distribution': topic_counts
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        duration = time.time() - start_time
+        logger.error(
+            f"Get document topics failed - Duration: {duration:.3f}s, Error: {str(e)}",
+            exc_info=True
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/topics/retrain")
+async def retrain_topics():
+    """
+    Manually trigger topic model retraining.
+
+    Fetches all documents from Qdrant and rebuilds the NMF topic model.
+    This is useful when you want to update topics after adding many documents.
+
+    **Note**: This can take several minutes for large collections.
+
+    Example response:
+    ```json
+    {
+        "success": true,
+        "message": "Topic model retrained successfully",
+        "model_info": {
+            "n_topics": 10,
+            "n_training_samples": 2500,
+            "n_documents": 150
+        }
+    }
+    ```
+    """
+    start_time = time.time()
+    logger.warning("Manual topic retraining requested")
+
+    try:
+        # Check if topic modeling is enabled
+        if not service.config.enable_topic_modeling:
+            raise HTTPException(
+                status_code=400,
+                detail="Topic modeling is not enabled"
+            )
+
+        # Trigger retraining
+        logger.info("Starting manual retraining...")
+        service.topic_manager.trigger_retrain_async()
+
+        # Get updated model info
+        topic_stats = service.topic_manager.get_topic_stats()
+        model_info = topic_stats.get('model_info', {})
+
+        duration = time.time() - start_time
+        logger.warning(f"Manual retraining completed - Duration: {duration:.2f}s")
+
+        return {
+            'success': True,
+            'message': 'Topic model retrained successfully',
+            'model_info': {
+                'n_topics': model_info.get('n_topics'),
+                'n_features': model_info.get('n_features'),
+                'reconstruction_error': model_info.get('reconstruction_error')
+            },
+            'duration': f"{duration:.2f}s"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        duration = time.time() - start_time
+        logger.error(
+            f"Manual retraining failed - Duration: {duration:.2f}s, Error: {str(e)}",
+            exc_info=True
+        )
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ---------------------------------------------------------

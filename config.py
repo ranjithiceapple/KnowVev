@@ -94,6 +94,16 @@ class Config:
     enable_timing_logs: bool
     enable_memory_profiling: bool
 
+    # Topic Modeling Configuration
+    enable_topic_modeling: bool
+    topic_n_topics: int
+    topic_max_features: int
+    topic_min_df: int
+    topic_max_df: float
+    topic_model_dir: str
+    topic_retrain_threshold_docs: int
+    topic_retrain_threshold_pct: float
+
     # Pipeline version
     version: str
 
@@ -156,6 +166,16 @@ def load_config() -> Config:
         show_progress=get_bool("SHOW_PROGRESS", True),
         enable_timing_logs=get_bool("ENABLE_TIMING_LOGS", True),
         enable_memory_profiling=get_bool("ENABLE_MEMORY_PROFILING", False),
+
+        # Topic Modeling
+        enable_topic_modeling=get_bool("ENABLE_TOPIC_MODELING", True),
+        topic_n_topics=get_int("TOPIC_N_TOPICS", 10),
+        topic_max_features=get_int("TOPIC_MAX_FEATURES", 5000),
+        topic_min_df=get_int("TOPIC_MIN_DF", 2),
+        topic_max_df=get_float("TOPIC_MAX_DF", 0.85),
+        topic_model_dir=os.getenv("TOPIC_MODEL_DIR", "models/topics"),
+        topic_retrain_threshold_docs=get_int("TOPIC_RETRAIN_THRESHOLD_DOCS", 100),
+        topic_retrain_threshold_pct=get_float("TOPIC_RETRAIN_THRESHOLD_PCT", 0.20),
 
         # Version
         version=os.getenv("VERSION", "1.0"),

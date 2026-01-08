@@ -72,6 +72,12 @@ class ServiceConfig:
     summary_max_length: int = 2000
     summary_method: str = "hybrid"  # 'extractive', 'abstractive', 'hybrid'
 
+    # Topic modeling settings
+    enable_topic_modeling: bool = True
+    topic_n_topics: int = 10
+    topic_model_dir: str = "models/topics"
+    topic_retrain_threshold: int = 100
+
     # Pipeline version
     version: str = "1.0"
 
@@ -102,8 +108,12 @@ class ProcessingResult:
     chunking_time: float = 0.0
     summary_time: float = 0.0
     embedding_time: float = 0.0
+    topic_modeling_time: float = 0.0
     storage_time: float = 0.0
     total_time: float = 0.0
+
+    # Topic modeling results
+    document_topic: Optional[str] = None
 
     # Error information
     error_message: Optional[str] = None
@@ -132,6 +142,7 @@ class ProcessingResult:
                 'chunking_time': f"{self.chunking_time:.2f}s",
                 'summary_time': f"{self.summary_time:.2f}s",
                 'embedding_time': f"{self.embedding_time:.2f}s",
+                'topic_modeling_time': f"{self.topic_modeling_time:.2f}s",
                 'storage_time': f"{self.storage_time:.2f}s",
                 'total_time': f"{self.total_time:.2f}s",
             },
@@ -201,6 +212,28 @@ class DocumentToVectorService:
         # Setup collection
         logger.info("Ensuring Qdrant collection exists")
         self._ensure_collection_exists()
+
+        # Initialize topic modeling
+        if self.config.enable_topic_modeling:
+            try:
+                logger.info("Initializing topic modeling...")
+                from topic_modeling_service import TopicModelManager, TopicConfig
+
+                topic_config = TopicConfig(
+                    enabled=self.config.enable_topic_modeling,
+                    n_topics=self.config.topic_n_topics,
+                    model_dir=self.config.topic_model_dir,
+                    retrain_threshold_docs=self.config.topic_retrain_threshold
+                )
+
+                self.topic_manager = TopicModelManager(topic_config, self.storage)
+                logger.info("Topic modeling initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize topic modeling: {e}")
+                logger.warning("Continuing without topic modeling")
+                self.config.enable_topic_modeling = False
+        else:
+            logger.info("Topic modeling disabled")
 
         init_duration = time.time() - init_start
         logger.info(f"DocumentToVectorService initialized successfully in {init_duration:.2f}s")
@@ -408,6 +441,53 @@ class DocumentToVectorService:
 
             logger.info(f"[{doc_id}] ✅ Generated {len(embeddings)} embeddings in {result.embedding_time:.2f}s")
             logger.info(f"[{doc_id}]    Deduplication: {dedup_stats.deduplication_rate:.1f}%")
+
+            # ================================================================
+            # STAGE 4.5: TOPIC MODELING (OPTIONAL)
+            # ================================================================
+            if self.config.enable_topic_modeling:
+                logger.info(f"[{doc_id}] Stage 4.5/6: Assigning topics...")
+                stage_start = time.time()
+
+                try:
+                    # Get topic assignments (hybrid: doc-level + chunk-level)
+                    doc_topic, chunk_topics = self.topic_manager.assign_topics_hybrid(
+                        chunks=chunks,
+                        embeddings_text=texts  # Same texts used for embeddings
+                    )
+
+                    # Inject topic metadata into embedding records
+                    for i, record in enumerate(embedding_records):
+                        if i < len(chunk_topics):
+                            record.embedding_metadata['topic'] = {
+                                'topic_id': chunk_topics[i].topic_id,
+                                'topic_label': chunk_topics[i].topic_label,
+                                'confidence': chunk_topics[i].confidence,
+                                'keywords': chunk_topics[i].keywords,
+                                'distribution': chunk_topics[i].distribution
+                            }
+
+                            # Also store document-level topic for context
+                            record.embedding_metadata['document_topic'] = {
+                                'topic_id': doc_topic.topic_id,
+                                'topic_label': doc_topic.topic_label
+                            }
+
+                    result.topic_modeling_time = time.time() - stage_start
+                    result.document_topic = doc_topic.topic_label
+
+                    logger.info(f"[{doc_id}] ✅ Topics assigned in {result.topic_modeling_time:.2f}s")
+                    logger.info(f"[{doc_id}]    Document topic: {doc_topic.topic_label} (confidence: {doc_topic.confidence:.2f})")
+
+                    # Check if retraining needed
+                    if self.topic_manager.should_retrain():
+                        logger.info(f"[{doc_id}] Triggering background retraining...")
+                        self.topic_manager.trigger_retrain_async()
+
+                except Exception as e:
+                    logger.error(f"[{doc_id}] Topic modeling failed: {e}", exc_info=True)
+                    result.topic_modeling_time = time.time() - stage_start
+                    logger.warning(f"[{doc_id}] Continuing without topics")
 
             # ================================================================
             # STAGE 5: STORE IN QDRANT
