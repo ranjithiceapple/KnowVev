@@ -1,0 +1,15 @@
+[Unit]
+Description=KnowVec API V2
+After=network.target
+
+[Service]
+Type=simple
+User=knowvec
+WorkingDirectory=/opt/knowvec/KnowVev
+Environment="PATH=/opt/knowvec/venv/bin"
+ExecStart=/opt/knowvec/venv/bin/python api_v2.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

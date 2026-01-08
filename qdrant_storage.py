@@ -291,6 +291,29 @@ class QdrantStorage:
 
         return result
 
+    def upsert_points(self, points: List[Dict]):
+        """
+        Upsert points (for V2 pipeline).
+        Points format: [{'id': str, 'vector': List[float], 'payload': Dict}]
+        """
+        logger.info(f"Upserting {len(points)} points")
+
+        point_structs = [
+            PointStruct(
+                id=p['id'],
+                vector=p['vector'],
+                payload=p['payload']
+            )
+            for p in points
+        ]
+
+        self.client.upsert(
+            collection_name=self.config.collection_name,
+            points=point_structs
+        )
+
+        logger.info(f"Upserted {len(points)} points")
+
     def search(self, query_vector: List[float], limit: int = 10, filters: Optional[Dict] = None, score_threshold: Optional[float] = None,):
         start_time = time.time()
         logger.info(
