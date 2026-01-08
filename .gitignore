@@ -5,7 +5,14 @@ __pycache__/
 # Logs
 *.log
 logs/*
-!logs/knowvec.logs   # explicitly tracked
+!logs/knowvec.logs # explicitly tracked
 
 # VENV
 know_venv
+
+# data
+*.data
+*.data.backup
+
+# env
+.env
