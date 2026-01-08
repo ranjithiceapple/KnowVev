@@ -4,10 +4,10 @@ After=network.target
 
 [Service]
 Type=simple
-User=knowvec
-WorkingDirectory=/opt/knowvec/KnowVev
-Environment="PATH=/opt/knowvec/venv/bin"
-ExecStart=/opt/knowvec/venv/bin/python api_v2.py
+User=ranjith
+WorkingDirectory=/home/ranjith/workspaces/KnowVec/KnowVev
+Environment="PATH=/home/ranjith/workspaces/KnowVec/KnowVev/know_venv/bin"
+ExecStart=/home/ranjith/workspaces/KnowVec/KnowVev/know_venv/bin/python api_v2.py
 Restart=always
 RestartSec=10
 
