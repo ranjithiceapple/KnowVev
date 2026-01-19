@@ -37,6 +37,24 @@ class BoundaryType(Enum):
     BULLET_LIST = "bullet_list"
 
 
+class ChunkType(Enum):
+    """
+    Types of chunks for hybrid (OpenSearch + vector) search.
+
+    Different chunk types serve different retrieval purposes:
+    - CONTENT: Standard content chunks for semantic search
+    - HEADING: Heading-only chunks for keyword/faceted search
+    - CLAUSE: Single-sentence/clause chunks for precise retrieval
+    - METADATA: Document metadata chunks for filtering
+    - SUMMARY: Section/document summary chunks for high-level matching
+    """
+    CONTENT = "content"           # Standard content chunks
+    HEADING = "heading"           # Heading-only chunks (titles, section names)
+    CLAUSE = "clause"             # Single sentence/clause chunks
+    METADATA = "metadata"         # Document metadata chunks
+    SUMMARY = "summary"           # Summary chunks (section/document level)
+
+
 @dataclass
 class ChunkMetadata:
     """
@@ -73,6 +91,10 @@ class ChunkMetadata:
     has_overlap: bool = False
     overlap_with_previous: int = 0  # Characters overlapping with previous chunk
     overlap_with_next: int = 0  # Characters overlapping with next chunk
+
+    # Chunk type for hybrid search
+    chunk_type: str = ChunkType.CONTENT.value  # content, heading, clause, metadata, summary
+    parent_chunk_id: Optional[str] = None  # Reference to parent content chunk (for clause/heading chunks)
 
     # Content
     normalized_text: str = ""  # Actual chunk content (normalized)
@@ -127,6 +149,23 @@ class ChunkingConfig:
     # Metadata options
     include_original_page_text: bool = False  # For debugging (increases memory)
     extract_urls: bool = True
+
+    # Hybrid search chunk types (OpenSearch + Vector)
+    # These generate additional specialized chunks alongside content chunks
+    generate_heading_chunks: bool = False    # Generate heading-only chunks for keyword search
+    generate_clause_chunks: bool = False     # Generate single-sentence/clause chunks for precise retrieval
+    generate_metadata_chunks: bool = False   # Generate document metadata chunks for filtering
+    generate_summary_chunks: bool = False    # Generate summary chunks for high-level matching
+
+    # Clause chunking options
+    clause_min_length: int = 20              # Minimum clause length in characters
+    clause_max_length: int = 300             # Maximum clause length in characters
+    clause_overlap_sentences: int = 1        # Number of adjacent sentences for context
+
+    # Summary options (requires external summarizer or extracts first N sentences)
+    summary_sentences: int = 3               # Number of sentences to extract for section summaries
+    generate_document_summary: bool = True   # Generate a document-level summary chunk
+    generate_section_summaries: bool = True  # Generate section-level summary chunks
 
 
 class BoundaryDetector:
@@ -1131,6 +1170,516 @@ class EnterpriseChunkingPipeline:
 
         return chunk_metadatas
 
+    # =========================================================================
+    # HYBRID SEARCH CHUNK GENERATORS
+    # These methods generate specialized chunks for OpenSearch + Vector search
+    # =========================================================================
+
+    def _generate_heading_chunks(
+        self,
+        content_chunks: List[ChunkMetadata],
+        extraction_result,
+        doc_id: str
+    ) -> List[ChunkMetadata]:
+        """
+        Generate heading-only chunks for keyword/faceted search in OpenSearch.
+
+        Heading chunks contain:
+        - Section titles and their hierarchical path
+        - Page reference for navigation
+        - Minimal text for keyword matching
+
+        These chunks are optimized for:
+        - Keyword search on section names
+        - Faceted filtering by section
+        - Table of contents generation
+        - Navigation breadcrumbs
+
+        Args:
+            content_chunks: List of content chunks to extract headings from
+            extraction_result: Original extraction result
+            doc_id: Document ID
+
+        Returns:
+            List of heading-only ChunkMetadata objects
+        """
+        heading_chunks = []
+        seen_headings = set()  # Avoid duplicates
+
+        for content_chunk in content_chunks:
+            section_title = content_chunk.section_title
+            if not section_title or section_title in seen_headings:
+                continue
+
+            seen_headings.add(section_title)
+
+            # Build heading text with hierarchy context
+            heading_path = content_chunk.heading_path or []
+            if heading_path:
+                heading_text = " > ".join(heading_path)
+            else:
+                heading_text = section_title
+
+            # Create heading chunk
+            heading_chunk = ChunkMetadata(
+                doc_id=doc_id,
+                file_name=content_chunk.file_name,
+                chunk_id=f"{doc_id}_heading_{len(heading_chunks):04d}",
+                page_number_start=content_chunk.page_number_start,
+                page_number_end=content_chunk.page_number_start,  # Headings are single-page reference
+                section_title=section_title,
+                section_title_raw=content_chunk.section_title_raw,
+                heading_path=heading_path,
+                heading_level=content_chunk.heading_level,
+                parent_section=content_chunk.parent_section,
+                chunk_index=len(heading_chunks),
+                total_chunks=0,  # Will be updated later
+                chunk_char_len=len(heading_text),
+                chunk_word_count=len(heading_text.split()),
+                boundary_type=BoundaryType.SECTION.value,
+                chunk_type=ChunkType.HEADING.value,
+                parent_chunk_id=content_chunk.chunk_id,
+                normalized_text=heading_text,
+                has_overlap=False
+            )
+
+            heading_chunks.append(heading_chunk)
+
+        # Update total_chunks count
+        for chunk in heading_chunks:
+            chunk.total_chunks = len(heading_chunks)
+
+        logger.info(f"Generated {len(heading_chunks)} heading-only chunks")
+        return heading_chunks
+
+    def _generate_clause_chunks(
+        self,
+        content_chunks: List[ChunkMetadata],
+        extraction_result,
+        doc_id: str
+    ) -> List[ChunkMetadata]:
+        """
+        Generate clause/sentence-level chunks for precise retrieval.
+
+        Clause chunks contain:
+        - Individual sentences or clauses
+        - Optional context from adjacent sentences
+        - Reference to parent content chunk
+
+        These chunks are optimized for:
+        - Precise semantic matching
+        - Question-answering systems
+        - Fact extraction
+        - Citation-level retrieval
+
+        Args:
+            content_chunks: List of content chunks to split into clauses
+            extraction_result: Original extraction result
+            doc_id: Document ID
+
+        Returns:
+            List of clause-level ChunkMetadata objects
+        """
+        clause_chunks = []
+
+        # Sentence splitting pattern (handles common abbreviations)
+        sentence_pattern = re.compile(
+            r'(?<!\b(?:Mr|Mrs|Ms|Dr|Prof|Inc|Ltd|Corp|vs|etc|i\.e|e\.g))'
+            r'(?<=[.!?])\s+(?=[A-Z])'
+        )
+
+        for content_chunk in content_chunks:
+            text = content_chunk.normalized_text
+            if not text or len(text) < self.config.clause_min_length:
+                continue
+
+            # Split into sentences
+            sentences = sentence_pattern.split(text)
+            sentences = [s.strip() for s in sentences if s.strip()]
+
+            if not sentences:
+                continue
+
+            for i, sentence in enumerate(sentences):
+                # Skip sentences that are too short or too long
+                if len(sentence) < self.config.clause_min_length:
+                    continue
+                if len(sentence) > self.config.clause_max_length:
+                    # For very long sentences, keep them but mark them
+                    pass
+
+                # Build clause text with optional context
+                clause_text = sentence
+                context_sentences = []
+
+                # Add context from adjacent sentences if configured
+                if self.config.clause_overlap_sentences > 0:
+                    # Previous sentence context
+                    if i > 0:
+                        prev_idx = max(0, i - self.config.clause_overlap_sentences)
+                        context_sentences.extend(sentences[prev_idx:i])
+
+                    # Next sentence context
+                    if i < len(sentences) - 1:
+                        next_idx = min(len(sentences), i + 1 + self.config.clause_overlap_sentences)
+                        context_sentences.extend(sentences[i+1:next_idx])
+
+                # Create clause chunk
+                clause_chunk = ChunkMetadata(
+                    doc_id=doc_id,
+                    file_name=content_chunk.file_name,
+                    chunk_id=f"{doc_id}_clause_{len(clause_chunks):04d}",
+                    page_number_start=content_chunk.page_number_start,
+                    page_number_end=content_chunk.page_number_end,
+                    section_title=content_chunk.section_title,
+                    section_title_raw=content_chunk.section_title_raw,
+                    heading_path=content_chunk.heading_path,
+                    heading_level=content_chunk.heading_level,
+                    parent_section=content_chunk.parent_section,
+                    chunk_index=len(clause_chunks),
+                    total_chunks=0,  # Will be updated later
+                    chunk_char_len=len(clause_text),
+                    chunk_word_count=len(clause_text.split()),
+                    boundary_type=BoundaryType.SENTENCE.value,
+                    chunk_type=ChunkType.CLAUSE.value,
+                    parent_chunk_id=content_chunk.chunk_id,
+                    normalized_text=clause_text,
+                    has_overlap=len(context_sentences) > 0,
+                    overlap_with_previous=len(" ".join(context_sentences[:self.config.clause_overlap_sentences])) if context_sentences else 0
+                )
+
+                clause_chunks.append(clause_chunk)
+
+        # Update total_chunks count
+        for chunk in clause_chunks:
+            chunk.total_chunks = len(clause_chunks)
+
+        logger.info(f"Generated {len(clause_chunks)} clause-level chunks")
+        return clause_chunks
+
+    def _generate_metadata_chunks(
+        self,
+        extraction_result,
+        doc_id: str
+    ) -> List[ChunkMetadata]:
+        """
+        Generate metadata-only chunks for filtering and faceted search.
+
+        Metadata chunks contain:
+        - Document title, author, creation date
+        - File information (name, type, size)
+        - Custom metadata fields
+        - Keywords and tags
+
+        These chunks are optimized for:
+        - Faceted filtering in OpenSearch
+        - Document-level search
+        - Metadata-based retrieval
+        - Document classification
+
+        Args:
+            extraction_result: Original extraction result with metadata
+            doc_id: Document ID
+
+        Returns:
+            List of metadata ChunkMetadata objects
+        """
+        metadata_chunks = []
+        doc_metadata = extraction_result.metadata
+
+        # Build metadata text representation
+        metadata_parts = []
+
+        # Core document info
+        if doc_metadata.file_name:
+            metadata_parts.append(f"File: {doc_metadata.file_name}")
+
+        if doc_metadata.file_type:
+            metadata_parts.append(f"Type: {doc_metadata.file_type}")
+
+        # PDF-specific metadata
+        if hasattr(doc_metadata, 'title') and doc_metadata.title:
+            metadata_parts.append(f"Title: {doc_metadata.title}")
+
+        if hasattr(doc_metadata, 'author') and doc_metadata.author:
+            metadata_parts.append(f"Author: {doc_metadata.author}")
+
+        if hasattr(doc_metadata, 'subject') and doc_metadata.subject:
+            metadata_parts.append(f"Subject: {doc_metadata.subject}")
+
+        if hasattr(doc_metadata, 'keywords') and doc_metadata.keywords:
+            metadata_parts.append(f"Keywords: {doc_metadata.keywords}")
+
+        if hasattr(doc_metadata, 'creator') and doc_metadata.creator:
+            metadata_parts.append(f"Creator: {doc_metadata.creator}")
+
+        if hasattr(doc_metadata, 'producer') and doc_metadata.producer:
+            metadata_parts.append(f"Producer: {doc_metadata.producer}")
+
+        if hasattr(doc_metadata, 'creation_date') and doc_metadata.creation_date:
+            metadata_parts.append(f"Created: {doc_metadata.creation_date}")
+
+        if hasattr(doc_metadata, 'modification_date') and doc_metadata.modification_date:
+            metadata_parts.append(f"Modified: {doc_metadata.modification_date}")
+
+        # Page count
+        if hasattr(doc_metadata, 'page_count') and doc_metadata.page_count:
+            metadata_parts.append(f"Pages: {doc_metadata.page_count}")
+
+        # Build metadata text
+        metadata_text = "\n".join(metadata_parts) if metadata_parts else f"Document: {doc_metadata.file_name}"
+
+        # Create metadata chunk
+        metadata_chunk = ChunkMetadata(
+            doc_id=doc_id,
+            file_name=doc_metadata.file_name,
+            chunk_id=f"{doc_id}_metadata_0000",
+            page_number_start=1,
+            page_number_end=1,
+            section_title="Document Metadata",
+            heading_path=["Document Metadata"],
+            heading_level=1,
+            chunk_index=0,
+            total_chunks=1,
+            chunk_char_len=len(metadata_text),
+            chunk_word_count=len(metadata_text.split()),
+            boundary_type=BoundaryType.PAGE.value,
+            chunk_type=ChunkType.METADATA.value,
+            normalized_text=metadata_text,
+            has_overlap=False
+        )
+
+        metadata_chunks.append(metadata_chunk)
+
+        logger.info(f"Generated {len(metadata_chunks)} metadata chunks")
+        return metadata_chunks
+
+    def _generate_summary_chunks(
+        self,
+        content_chunks: List[ChunkMetadata],
+        extraction_result,
+        doc_id: str
+    ) -> List[ChunkMetadata]:
+        """
+        Generate summary chunks for high-level document understanding.
+
+        Summary chunks contain:
+        - Document-level summary (first N sentences of document)
+        - Section-level summaries (first N sentences of each section)
+
+        These chunks are optimized for:
+        - High-level semantic matching
+        - Document overview retrieval
+        - Topic identification
+        - Executive summary search
+
+        Note: This uses extractive summarization (first N sentences).
+        For abstractive summaries, integrate with an external summarizer.
+
+        Args:
+            content_chunks: List of content chunks
+            extraction_result: Original extraction result
+            doc_id: Document ID
+
+        Returns:
+            List of summary ChunkMetadata objects
+        """
+        summary_chunks = []
+
+        # Sentence pattern for extraction
+        sentence_pattern = re.compile(
+            r'(?<!\b(?:Mr|Mrs|Ms|Dr|Prof|Inc|Ltd|Corp|vs|etc|i\.e|e\.g))'
+            r'(?<=[.!?])\s+(?=[A-Z])'
+        )
+
+        # Generate document-level summary
+        if self.config.generate_document_summary:
+            # Collect text from first few content chunks
+            doc_text = " ".join([c.normalized_text for c in content_chunks[:5]])
+            sentences = sentence_pattern.split(doc_text)
+            sentences = [s.strip() for s in sentences if s.strip() and len(s.strip()) > 20]
+
+            # Take first N sentences as summary
+            summary_sentences = sentences[:self.config.summary_sentences]
+            doc_summary_text = " ".join(summary_sentences)
+
+            if doc_summary_text:
+                doc_summary_chunk = ChunkMetadata(
+                    doc_id=doc_id,
+                    file_name=extraction_result.metadata.file_name,
+                    chunk_id=f"{doc_id}_summary_doc_0000",
+                    page_number_start=1,
+                    page_number_end=content_chunks[-1].page_number_end if content_chunks else 1,
+                    section_title="Document Summary",
+                    heading_path=["Document Summary"],
+                    heading_level=1,
+                    chunk_index=0,
+                    total_chunks=0,  # Updated later
+                    chunk_char_len=len(doc_summary_text),
+                    chunk_word_count=len(doc_summary_text.split()),
+                    boundary_type=BoundaryType.PAGE.value,
+                    chunk_type=ChunkType.SUMMARY.value,
+                    normalized_text=doc_summary_text,
+                    has_overlap=False
+                )
+                summary_chunks.append(doc_summary_chunk)
+
+        # Generate section-level summaries
+        if self.config.generate_section_summaries:
+            # Group content chunks by section
+            sections = {}
+            for chunk in content_chunks:
+                section = chunk.section_title or "Untitled Section"
+                if section not in sections:
+                    sections[section] = []
+                sections[section].append(chunk)
+
+            for section_title, section_chunks in sections.items():
+                if section_title == "Untitled Section":
+                    continue  # Skip untitled sections
+
+                # Combine section text
+                section_text = " ".join([c.normalized_text for c in section_chunks])
+                sentences = sentence_pattern.split(section_text)
+                sentences = [s.strip() for s in sentences if s.strip() and len(s.strip()) > 20]
+
+                # Take first N sentences as section summary
+                summary_sentences = sentences[:self.config.summary_sentences]
+                section_summary_text = " ".join(summary_sentences)
+
+                if section_summary_text and len(section_summary_text) > 50:
+                    first_chunk = section_chunks[0]
+                    last_chunk = section_chunks[-1]
+
+                    section_summary_chunk = ChunkMetadata(
+                        doc_id=doc_id,
+                        file_name=extraction_result.metadata.file_name,
+                        chunk_id=f"{doc_id}_summary_sec_{len(summary_chunks):04d}",
+                        page_number_start=first_chunk.page_number_start,
+                        page_number_end=last_chunk.page_number_end,
+                        section_title=f"Summary: {section_title}",
+                        section_title_raw=section_title,
+                        heading_path=first_chunk.heading_path + ["Summary"] if first_chunk.heading_path else [section_title, "Summary"],
+                        heading_level=first_chunk.heading_level,
+                        parent_section=first_chunk.parent_section,
+                        chunk_index=len(summary_chunks),
+                        total_chunks=0,  # Updated later
+                        chunk_char_len=len(section_summary_text),
+                        chunk_word_count=len(section_summary_text.split()),
+                        boundary_type=BoundaryType.SECTION.value,
+                        chunk_type=ChunkType.SUMMARY.value,
+                        parent_chunk_id=first_chunk.chunk_id,
+                        normalized_text=section_summary_text,
+                        has_overlap=False
+                    )
+                    summary_chunks.append(section_summary_chunk)
+
+        # Update total_chunks count
+        for chunk in summary_chunks:
+            chunk.total_chunks = len(summary_chunks)
+
+        logger.info(f"Generated {len(summary_chunks)} summary chunks")
+        return summary_chunks
+
+    def generate_hybrid_chunks(
+        self,
+        extraction_result,
+        doc_id: Optional[str] = None,
+        normalized_text: Optional[str] = None
+    ) -> Dict[str, List[ChunkMetadata]]:
+        """
+        Generate all chunk types for hybrid (OpenSearch + vector) search.
+
+        This is the main entry point for hybrid chunking. It generates:
+        - Content chunks (standard semantic chunks)
+        - Heading chunks (for keyword search)
+        - Clause chunks (for precise retrieval)
+        - Metadata chunks (for filtering)
+        - Summary chunks (for high-level matching)
+
+        Args:
+            extraction_result: ExtractionResult from document_processor
+            doc_id: Optional document ID
+            normalized_text: Optional pre-normalized text
+
+        Returns:
+            Dictionary with keys: 'content', 'heading', 'clause', 'metadata', 'summary'
+            Each value is a list of ChunkMetadata objects
+        """
+        if doc_id is None:
+            doc_id = str(uuid.uuid4())
+
+        logger.info(f"Generating hybrid chunks for document: {extraction_result.metadata.file_name}")
+
+        # Generate standard content chunks first
+        content_chunks = self.chunk_document(extraction_result, doc_id, normalized_text)
+
+        # Initialize result dictionary
+        hybrid_chunks = {
+            'content': content_chunks,
+            'heading': [],
+            'clause': [],
+            'metadata': [],
+            'summary': []
+        }
+
+        # Generate heading chunks if enabled
+        if self.config.generate_heading_chunks:
+            hybrid_chunks['heading'] = self._generate_heading_chunks(
+                content_chunks, extraction_result, doc_id
+            )
+
+        # Generate clause chunks if enabled
+        if self.config.generate_clause_chunks:
+            hybrid_chunks['clause'] = self._generate_clause_chunks(
+                content_chunks, extraction_result, doc_id
+            )
+
+        # Generate metadata chunks if enabled
+        if self.config.generate_metadata_chunks:
+            hybrid_chunks['metadata'] = self._generate_metadata_chunks(
+                extraction_result, doc_id
+            )
+
+        # Generate summary chunks if enabled
+        if self.config.generate_summary_chunks:
+            hybrid_chunks['summary'] = self._generate_summary_chunks(
+                content_chunks, extraction_result, doc_id
+            )
+
+        # Log summary
+        total_chunks = sum(len(chunks) for chunks in hybrid_chunks.values())
+        logger.info(
+            f"Hybrid chunking complete - Total: {total_chunks} chunks "
+            f"(content: {len(hybrid_chunks['content'])}, "
+            f"heading: {len(hybrid_chunks['heading'])}, "
+            f"clause: {len(hybrid_chunks['clause'])}, "
+            f"metadata: {len(hybrid_chunks['metadata'])}, "
+            f"summary: {len(hybrid_chunks['summary'])})"
+        )
+
+        return hybrid_chunks
+
+    def get_all_chunks_flat(
+        self,
+        hybrid_chunks: Dict[str, List[ChunkMetadata]]
+    ) -> List[ChunkMetadata]:
+        """
+        Flatten hybrid chunks dictionary into a single list.
+
+        Useful for bulk indexing where you want all chunks in one list.
+
+        Args:
+            hybrid_chunks: Dictionary from generate_hybrid_chunks()
+
+        Returns:
+            Single flat list of all ChunkMetadata objects
+        """
+        all_chunks = []
+        for chunk_type in ['content', 'heading', 'clause', 'metadata', 'summary']:
+            all_chunks.extend(hybrid_chunks.get(chunk_type, []))
+        return all_chunks
+
 
 # Convenience functions
 
@@ -1182,6 +1731,79 @@ def chunk_with_normalization(
     return pipeline.chunk_document(extraction_result, normalized_text=normalized_text)
 
 
+def chunk_for_hybrid_search(
+    extraction_result,
+    max_chunk_size: int = 1000,
+    enable_overlap: bool = True,
+    overlap_size: int = 100,
+    generate_heading_chunks: bool = True,
+    generate_clause_chunks: bool = True,
+    generate_metadata_chunks: bool = True,
+    generate_summary_chunks: bool = True
+) -> Dict[str, List[ChunkMetadata]]:
+    """
+    Convenience function for hybrid (OpenSearch + vector) search chunking.
+
+    Generates multiple chunk types optimized for different search strategies:
+    - Content chunks: Standard semantic chunks for vector search
+    - Heading chunks: Section titles for keyword/faceted search
+    - Clause chunks: Single sentences for precise retrieval
+    - Metadata chunks: Document metadata for filtering
+    - Summary chunks: Document/section summaries for high-level matching
+
+    Args:
+        extraction_result: ExtractionResult from document_processor
+        max_chunk_size: Maximum content chunk size in characters
+        enable_overlap: Whether to enable overlap for content chunks
+        overlap_size: Overlap size in characters
+        generate_heading_chunks: Generate heading-only chunks
+        generate_clause_chunks: Generate clause/sentence chunks
+        generate_metadata_chunks: Generate metadata chunks
+        generate_summary_chunks: Generate summary chunks
+
+    Returns:
+        Dictionary with keys: 'content', 'heading', 'clause', 'metadata', 'summary'
+    """
+    config = ChunkingConfig(
+        max_chunk_size=max_chunk_size,
+        enable_overlap=enable_overlap,
+        overlap_size=overlap_size,
+        generate_heading_chunks=generate_heading_chunks,
+        generate_clause_chunks=generate_clause_chunks,
+        generate_metadata_chunks=generate_metadata_chunks,
+        generate_summary_chunks=generate_summary_chunks
+    )
+
+    pipeline = EnterpriseChunkingPipeline(config)
+    return pipeline.generate_hybrid_chunks(extraction_result)
+
+
+def get_hybrid_config(
+    max_chunk_size: int = 1000,
+    enable_all_chunk_types: bool = True
+) -> ChunkingConfig:
+    """
+    Get a pre-configured ChunkingConfig for hybrid search.
+
+    Args:
+        max_chunk_size: Maximum content chunk size
+        enable_all_chunk_types: If True, enables all hybrid chunk types
+
+    Returns:
+        ChunkingConfig configured for hybrid search
+    """
+    return ChunkingConfig(
+        max_chunk_size=max_chunk_size,
+        target_chunk_size=max_chunk_size // 2,
+        enable_overlap=True,
+        overlap_size=100,
+        generate_heading_chunks=enable_all_chunk_types,
+        generate_clause_chunks=enable_all_chunk_types,
+        generate_metadata_chunks=enable_all_chunk_types,
+        generate_summary_chunks=enable_all_chunk_types
+    )
+
+
 if __name__ == "__main__":
     print("Enterprise Chunking Pipeline")
     print("=" * 80)
@@ -1191,35 +1813,94 @@ if __name__ == "__main__":
     print("  ✅ Semantic windowing with overlap")
     print("  ✅ Token-aware chunking")
     print("  ✅ Rich metadata for each chunk")
+    print("\n  🆕 HYBRID SEARCH CHUNK TYPES (OpenSearch + Vector):")
+    print("  ✅ Heading-only chunks - for keyword/faceted search")
+    print("  ✅ Clause-only chunks - for precise sentence-level retrieval")
+    print("  ✅ Metadata-only chunks - for document filtering")
+    print("  ✅ Summary chunks - for high-level document matching")
     print("\nUsage example:")
     print("""
 from document_processor import extract_text_from_document
-from enterprise_chunking_pipeline import chunk_document_simple, ChunkingConfig
+from enterprise_chunking_pipeline import (
+    chunk_document_simple,
+    chunk_for_hybrid_search,
+    get_hybrid_config,
+    ChunkingConfig,
+    ChunkType
+)
 
 # Extract document
 result = extract_text_from_document('document.pdf', extract_metadata=True)
 
-# Simple chunking
+# Simple chunking (content only)
 chunks = chunk_document_simple(result, max_chunk_size=1000)
 
-# Advanced chunking
+# ============================================
+# HYBRID SEARCH CHUNKING (NEW!)
+# ============================================
+
+# Quick hybrid chunking with convenience function
+hybrid_chunks = chunk_for_hybrid_search(
+    result,
+    max_chunk_size=1000,
+    generate_heading_chunks=True,
+    generate_clause_chunks=True,
+    generate_metadata_chunks=True,
+    generate_summary_chunks=True
+)
+
+# Access different chunk types
+content_chunks = hybrid_chunks['content']   # Standard semantic chunks
+heading_chunks = hybrid_chunks['heading']   # Section titles only
+clause_chunks = hybrid_chunks['clause']     # Single sentences
+metadata_chunks = hybrid_chunks['metadata'] # Document metadata
+summary_chunks = hybrid_chunks['summary']   # Document/section summaries
+
+print(f"Generated chunks for hybrid search:")
+print(f"  Content: {len(content_chunks)} chunks")
+print(f"  Headings: {len(heading_chunks)} chunks")
+print(f"  Clauses: {len(clause_chunks)} chunks")
+print(f"  Metadata: {len(metadata_chunks)} chunks")
+print(f"  Summaries: {len(summary_chunks)} chunks")
+
+# Advanced hybrid chunking with full config
 config = ChunkingConfig(
     max_chunk_size=1000,
     target_chunk_size=500,
     enable_overlap=True,
     overlap_size=100,
-    respect_page_boundaries=True,
-    keep_tables_intact=True,
-    token_aware=True
+    # Hybrid search options
+    generate_heading_chunks=True,
+    generate_clause_chunks=True,
+    generate_metadata_chunks=True,
+    generate_summary_chunks=True,
+    # Clause options
+    clause_min_length=20,
+    clause_max_length=300,
+    # Summary options
+    summary_sentences=3,
+    generate_document_summary=True,
+    generate_section_summaries=True
 )
 
 from enterprise_chunking_pipeline import EnterpriseChunkingPipeline
 pipeline = EnterpriseChunkingPipeline(config)
-chunks = pipeline.chunk_document(result)
+hybrid_chunks = pipeline.generate_hybrid_chunks(result)
 
-# Access metadata
-for chunk in chunks:
+# Get all chunks as flat list (useful for bulk indexing)
+all_chunks = pipeline.get_all_chunks_flat(hybrid_chunks)
+
+# Filter by chunk type
+for chunk in all_chunks:
+    if chunk.chunk_type == ChunkType.HEADING.value:
+        print(f"Heading: {chunk.normalized_text}")
+    elif chunk.chunk_type == ChunkType.SUMMARY.value:
+        print(f"Summary: {chunk.normalized_text[:100]}...")
+
+# Access chunk metadata
+for chunk in hybrid_chunks['content'][:3]:
     print(f"Chunk {chunk.chunk_index + 1}/{chunk.total_chunks}")
+    print(f"  Type: {chunk.chunk_type}")
     print(f"  Pages: {chunk.page_number_start}-{chunk.page_number_end}")
     print(f"  Section: {chunk.section_title}")
     print(f"  Path: {' > '.join(chunk.heading_path)}")

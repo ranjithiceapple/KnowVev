@@ -19,10 +19,27 @@ from logger_config import get_logger
 # Import pipeline components
 from document_processor_llm import extract_text_from_document
 from metadata_aware_normalizer import normalize_with_metadata, NormalizationConfig
-from enterprise_chunking_pipeline import chunk_with_normalization, ChunkingConfig
+from enterprise_chunking_pipeline import (
+    chunk_with_normalization,
+    ChunkingConfig,
+    EnterpriseChunkingPipeline,
+    ChunkType
+)
 from embedding_preparation import prepare_for_embedding
 from qdrant_storage import QdrantStorage, QdrantConfig, setup_qdrant_collection
 from document_summarizer import DocumentSummarizer
+
+# Import OpenSearch for hybrid search
+try:
+    from opensearch_keyword_store import (
+        OpenSearchKeywordStore,
+        SearchStrategy,
+        KeywordExtractor
+    )
+    OPENSEARCH_AVAILABLE = True
+except ImportError:
+    OPENSEARCH_AVAILABLE = False
+    logger = None  # Will be set after logger initialization
 
 logger = get_logger(__name__)
 
@@ -43,6 +60,21 @@ class ServiceConfig:
     qdrant_url: str = "http://localhost:6333"
     qdrant_collection: str = "documents"
     qdrant_api_key: Optional[str] = None
+
+    # OpenSearch settings (for hybrid keyword search)
+    opensearch_enabled: bool = True
+    opensearch_host: str = "localhost"
+    opensearch_port: int = 9200
+    opensearch_username: Optional[str] = None
+    opensearch_password: Optional[str] = None
+    opensearch_use_ssl: bool = False
+    opensearch_index: str = "document_keywords"
+
+    # Hybrid chunking settings (for OpenSearch)
+    generate_heading_chunks: bool = True
+    generate_clause_chunks: bool = True
+    generate_metadata_chunks: bool = True
+    generate_summary_chunks: bool = True
 
     # Embedding model
     embedding_model_name: str = "all-MiniLM-L6-v2"
@@ -98,6 +130,15 @@ class ProcessingResult:
     has_summary: bool = False
     summary_length: int = 0
 
+    # OpenSearch hybrid search stats
+    opensearch_indexed: bool = False
+    opensearch_content_chunks: int = 0
+    opensearch_heading_chunks: int = 0
+    opensearch_clause_chunks: int = 0
+    opensearch_metadata_chunks: int = 0
+    opensearch_summary_chunks: int = 0
+    opensearch_total_chunks: int = 0
+
     # Vector IDs (for Base Model tracking and deletion)
     vector_ids: List[str] = field(default_factory=list)
     embedding_ids: List[str] = field(default_factory=list)  # Alias for vector_ids
@@ -110,6 +151,7 @@ class ProcessingResult:
     embedding_time: float = 0.0
     topic_modeling_time: float = 0.0
     storage_time: float = 0.0
+    opensearch_time: float = 0.0
     total_time: float = 0.0
 
     # Topic modeling results
@@ -134,6 +176,15 @@ class ProcessingResult:
                 'has_summary': self.has_summary,
                 'summary_length': self.summary_length,
             },
+            'opensearch': {
+                'indexed': self.opensearch_indexed,
+                'content_chunks': self.opensearch_content_chunks,
+                'heading_chunks': self.opensearch_heading_chunks,
+                'clause_chunks': self.opensearch_clause_chunks,
+                'metadata_chunks': self.opensearch_metadata_chunks,
+                'summary_chunks': self.opensearch_summary_chunks,
+                'total_chunks': self.opensearch_total_chunks,
+            },
             'vector_ids': self.vector_ids,  # For Base Model tracking
             'embedding_ids': self.embedding_ids,  # Alias
             'timing': {
@@ -144,6 +195,7 @@ class ProcessingResult:
                 'embedding_time': f"{self.embedding_time:.2f}s",
                 'topic_modeling_time': f"{self.topic_modeling_time:.2f}s",
                 'storage_time': f"{self.storage_time:.2f}s",
+                'opensearch_time': f"{self.opensearch_time:.2f}s",
                 'total_time': f"{self.total_time:.2f}s",
             },
             'error': {
@@ -234,6 +286,59 @@ class DocumentToVectorService:
                 self.config.enable_topic_modeling = False
         else:
             logger.info("Topic modeling disabled")
+
+        # Initialize OpenSearch for hybrid keyword search
+        self.opensearch_store = None
+        if self.config.opensearch_enabled:
+            if OPENSEARCH_AVAILABLE:
+                try:
+                    logger.info("Initializing OpenSearch for hybrid keyword search...")
+
+                    # Load OpenSearch settings from environment
+                    import os
+                    env_opensearch_host = os.getenv("OPENSEARCH_HOST")
+                    env_opensearch_port = os.getenv("OPENSEARCH_PORT")
+                    env_opensearch_user = os.getenv("OPENSEARCH_USERNAME")
+                    env_opensearch_pass = os.getenv("OPENSEARCH_PASSWORD")
+
+                    if env_opensearch_host:
+                        self.config.opensearch_host = env_opensearch_host
+                    if env_opensearch_port:
+                        self.config.opensearch_port = int(env_opensearch_port)
+                    if env_opensearch_user:
+                        self.config.opensearch_username = env_opensearch_user
+                    if env_opensearch_pass:
+                        self.config.opensearch_password = env_opensearch_pass
+
+                    self.opensearch_store = OpenSearchKeywordStore(
+                        host=self.config.opensearch_host,
+                        port=self.config.opensearch_port,
+                        username=self.config.opensearch_username,
+                        password=self.config.opensearch_password,
+                        use_ssl=self.config.opensearch_use_ssl
+                    )
+
+                    # Ensure index exists
+                    self.opensearch_store.create_index(
+                        self.config.opensearch_index,
+                        delete_if_exists=False
+                    )
+
+                    logger.info(
+                        f"OpenSearch initialized: {self.config.opensearch_host}:{self.config.opensearch_port}, "
+                        f"index: {self.config.opensearch_index}"
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to initialize OpenSearch: {e}")
+                    logger.warning("Continuing without OpenSearch hybrid search")
+                    self.opensearch_store = None
+                    self.config.opensearch_enabled = False
+            else:
+                logger.warning("opensearch-py not installed. Hybrid keyword search disabled.")
+                logger.warning("Install with: pip install opensearch-py")
+                self.config.opensearch_enabled = False
+        else:
+            logger.info("OpenSearch hybrid search disabled")
 
         init_duration = time.time() - init_start
         logger.info(f"DocumentToVectorService initialized successfully in {init_duration:.2f}s")
@@ -532,6 +637,65 @@ class DocumentToVectorService:
             logger.debug(f"[{doc_id}] Vector IDs: {vector_ids[:5]}..." if len(vector_ids) > 5 else f"[{doc_id}] Vector IDs: {vector_ids}")
 
             # ================================================================
+            # STAGE 6: INDEX IN OPENSEARCH (Hybrid Keyword Search)
+            # ================================================================
+            if self.opensearch_store and self.config.opensearch_enabled:
+                logger.info(f"[{doc_id}] Stage 6/6: Indexing in OpenSearch for hybrid search...")
+                stage_start = time.time()
+
+                try:
+                    # Create hybrid chunking config
+                    hybrid_chunk_config = ChunkingConfig(
+                        max_chunk_size=self.config.max_chunk_size,
+                        target_chunk_size=self.config.target_chunk_size,
+                        enable_overlap=self.config.enable_overlap,
+                        overlap_size=self.config.overlap_size,
+                        generate_heading_chunks=self.config.generate_heading_chunks,
+                        generate_clause_chunks=self.config.generate_clause_chunks,
+                        generate_metadata_chunks=self.config.generate_metadata_chunks,
+                        generate_summary_chunks=self.config.generate_summary_chunks
+                    )
+
+                    # Create pipeline and generate hybrid chunks
+                    hybrid_pipeline = EnterpriseChunkingPipeline(hybrid_chunk_config)
+                    hybrid_chunks = hybrid_pipeline.generate_hybrid_chunks(
+                        extraction_result,
+                        doc_id=doc_id,
+                        normalized_text=normalized_text
+                    )
+
+                    # Index hybrid chunks in OpenSearch
+                    opensearch_stats = self.opensearch_store.index_hybrid_chunks(
+                        self.config.opensearch_index,
+                        hybrid_chunks,
+                        doc_id=doc_id
+                    )
+
+                    # Update result statistics
+                    result.opensearch_indexed = True
+                    result.opensearch_content_chunks = len(hybrid_chunks.get('content', []))
+                    result.opensearch_heading_chunks = len(hybrid_chunks.get('heading', []))
+                    result.opensearch_clause_chunks = len(hybrid_chunks.get('clause', []))
+                    result.opensearch_metadata_chunks = len(hybrid_chunks.get('metadata', []))
+                    result.opensearch_summary_chunks = len(hybrid_chunks.get('summary', []))
+                    result.opensearch_total_chunks = opensearch_stats.get('success', 0)
+                    result.opensearch_time = time.time() - stage_start
+
+                    logger.info(f"[{doc_id}] ✅ Indexed {result.opensearch_total_chunks} chunks in OpenSearch in {result.opensearch_time:.2f}s")
+                    logger.info(
+                        f"[{doc_id}]    Breakdown: content={result.opensearch_content_chunks}, "
+                        f"heading={result.opensearch_heading_chunks}, clause={result.opensearch_clause_chunks}, "
+                        f"metadata={result.opensearch_metadata_chunks}, summary={result.opensearch_summary_chunks}"
+                    )
+
+                except Exception as e:
+                    logger.error(f"[{doc_id}] OpenSearch indexing failed: {e}", exc_info=True)
+                    result.opensearch_time = time.time() - stage_start
+                    logger.warning(f"[{doc_id}] Continuing without OpenSearch indexing")
+            else:
+                logger.debug(f"[{doc_id}] OpenSearch indexing skipped (disabled or not available)")
+
+            # ================================================================
             # SUCCESS
             # ================================================================
             result.success = True
@@ -541,6 +705,8 @@ class DocumentToVectorService:
             logger.info(f"[{doc_id}]    Pages: {result.pages_extracted}")
             logger.info(f"[{doc_id}]    Chunks: {result.chunks_created} → {result.unique_chunks} unique")
             logger.info(f"[{doc_id}]    Vectors: {result.vectors_stored} stored in Qdrant")
+            if result.opensearch_indexed:
+                logger.info(f"[{doc_id}]    OpenSearch: {result.opensearch_total_chunks} keyword chunks indexed")
 
         except Exception as e:
             # Handle errors
@@ -749,6 +915,427 @@ class DocumentToVectorService:
     def get_collection_stats(self) -> Dict:
         """Get statistics about the collection."""
         return self.storage.collection_manager.collection_info()
+
+    # =========================================================================
+    # DOCUMENT DELETION METHODS
+    # =========================================================================
+
+    def delete_document(
+        self,
+        doc_id: str,
+        delete_from_qdrant: bool = True,
+        delete_from_opensearch: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Delete a document from both Qdrant and OpenSearch.
+
+        This method removes all vectors and keywords associated with a document.
+        Use this when a document is deleted from your system.
+
+        Args:
+            doc_id: Document ID to delete
+            delete_from_qdrant: Whether to delete from Qdrant vector store
+            delete_from_opensearch: Whether to delete from OpenSearch keyword store
+
+        Returns:
+            Dict with deletion statistics:
+            - qdrant_deleted: Number of vectors deleted from Qdrant
+            - opensearch_deleted: Number of chunks deleted from OpenSearch
+            - success: Overall success status
+        """
+        logger.info(f"Deleting document: {doc_id}")
+
+        result = {
+            'doc_id': doc_id,
+            'qdrant_deleted': 0,
+            'opensearch_deleted': 0,
+            'qdrant_success': False,
+            'opensearch_success': False,
+            'success': False
+        }
+
+        # Delete from Qdrant
+        if delete_from_qdrant:
+            try:
+                logger.info(f"[{doc_id}] Deleting from Qdrant...")
+
+                # Use scroll to find all vectors for this doc_id
+                qdrant_filter = {"doc_id": doc_id}
+                vectors_to_delete = self.storage.filter_by_metadata(
+                    filters=qdrant_filter,
+                    limit=10000  # High limit to get all
+                )
+
+                if vectors_to_delete:
+                    # Extract vector IDs
+                    vector_ids = [v.get('id') for v in vectors_to_delete if v.get('id')]
+
+                    # Delete vectors
+                    if vector_ids:
+                        delete_result = self.storage.delete_by_ids(vector_ids)
+                        result['qdrant_deleted'] = len(vector_ids)
+                        result['qdrant_success'] = True
+                        logger.info(f"[{doc_id}] ✅ Deleted {len(vector_ids)} vectors from Qdrant")
+                else:
+                    logger.info(f"[{doc_id}] No vectors found in Qdrant")
+                    result['qdrant_success'] = True
+
+            except Exception as e:
+                logger.error(f"[{doc_id}] Failed to delete from Qdrant: {e}")
+                result['qdrant_error'] = str(e)
+
+        # Delete from OpenSearch
+        if delete_from_opensearch and self.opensearch_store:
+            try:
+                logger.info(f"[{doc_id}] Deleting from OpenSearch...")
+
+                opensearch_result = self.opensearch_store.delete_document(
+                    self.config.opensearch_index,
+                    doc_id
+                )
+
+                result['opensearch_deleted'] = opensearch_result.get('deleted', 0)
+                result['opensearch_success'] = True
+                logger.info(f"[{doc_id}] ✅ Deleted {result['opensearch_deleted']} chunks from OpenSearch")
+
+            except Exception as e:
+                logger.error(f"[{doc_id}] Failed to delete from OpenSearch: {e}")
+                result['opensearch_error'] = str(e)
+        elif delete_from_opensearch and not self.opensearch_store:
+            logger.debug(f"[{doc_id}] OpenSearch not available, skipping")
+            result['opensearch_success'] = True  # Not a failure if not configured
+
+        # Overall success
+        result['success'] = result['qdrant_success'] and result['opensearch_success']
+
+        total_deleted = result['qdrant_deleted'] + result['opensearch_deleted']
+        logger.info(f"[{doc_id}] Delete complete: {total_deleted} total items removed")
+
+        return result
+
+    def delete_document_by_file_name(
+        self,
+        file_name: str,
+        delete_from_qdrant: bool = True,
+        delete_from_opensearch: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Delete a document by file name from both Qdrant and OpenSearch.
+
+        Args:
+            file_name: File name to delete
+            delete_from_qdrant: Whether to delete from Qdrant
+            delete_from_opensearch: Whether to delete from OpenSearch
+
+        Returns:
+            Dict with deletion statistics
+        """
+        logger.info(f"Deleting document by file name: {file_name}")
+
+        result = {
+            'file_name': file_name,
+            'qdrant_deleted': 0,
+            'opensearch_deleted': 0,
+            'success': False
+        }
+
+        # Delete from Qdrant
+        if delete_from_qdrant:
+            try:
+                qdrant_filter = {"file_name": file_name}
+                vectors_to_delete = self.storage.filter_by_metadata(
+                    filters=qdrant_filter,
+                    limit=10000
+                )
+
+                if vectors_to_delete:
+                    vector_ids = [v.get('id') for v in vectors_to_delete if v.get('id')]
+                    if vector_ids:
+                        self.storage.delete_by_ids(vector_ids)
+                        result['qdrant_deleted'] = len(vector_ids)
+
+                logger.info(f"Deleted {result['qdrant_deleted']} vectors from Qdrant")
+
+            except Exception as e:
+                logger.error(f"Failed to delete from Qdrant: {e}")
+                result['qdrant_error'] = str(e)
+
+        # Delete from OpenSearch
+        if delete_from_opensearch and self.opensearch_store:
+            try:
+                opensearch_result = self.opensearch_store.delete_by_file_name(
+                    self.config.opensearch_index,
+                    file_name
+                )
+                result['opensearch_deleted'] = opensearch_result.get('deleted', 0)
+                logger.info(f"Deleted {result['opensearch_deleted']} chunks from OpenSearch")
+
+            except Exception as e:
+                logger.error(f"Failed to delete from OpenSearch: {e}")
+                result['opensearch_error'] = str(e)
+
+        result['success'] = 'qdrant_error' not in result and 'opensearch_error' not in result
+        return result
+
+    def check_document_exists(self, doc_id: str) -> Dict[str, Any]:
+        """
+        Check if a document exists in both Qdrant and OpenSearch.
+
+        Args:
+            doc_id: Document ID to check
+
+        Returns:
+            Dict with existence information
+        """
+        result = {
+            'doc_id': doc_id,
+            'exists_in_qdrant': False,
+            'exists_in_opensearch': False,
+            'qdrant_count': 0,
+            'opensearch_count': 0
+        }
+
+        # Check Qdrant
+        try:
+            qdrant_filter = {"doc_id": doc_id}
+            vectors = self.storage.filter_by_metadata(
+                filters=qdrant_filter,
+                limit=1
+            )
+            result['exists_in_qdrant'] = len(vectors) > 0
+
+            # Get count
+            all_vectors = self.storage.filter_by_metadata(
+                filters=qdrant_filter,
+                limit=10000
+            )
+            result['qdrant_count'] = len(all_vectors)
+
+        except Exception as e:
+            logger.error(f"Error checking Qdrant: {e}")
+
+        # Check OpenSearch
+        if self.opensearch_store:
+            try:
+                os_info = self.opensearch_store.check_document_exists(
+                    self.config.opensearch_index,
+                    doc_id
+                )
+                result['exists_in_opensearch'] = os_info.get('exists', False)
+                result['opensearch_count'] = os_info.get('total_chunks', 0)
+                result['opensearch_chunks_by_type'] = os_info.get('chunks_by_type', {})
+
+            except Exception as e:
+                logger.error(f"Error checking OpenSearch: {e}")
+
+        return result
+
+    # =========================================================================
+    # KEYWORD SEARCH METHODS (OpenSearch)
+    # =========================================================================
+
+    def keyword_search(
+        self,
+        query: str,
+        limit: int = 10,
+        strategy: str = "multi_match",
+        chunk_types: List[str] = None,
+        filters: Optional[Dict] = None
+    ) -> List[Dict]:
+        """
+        Perform keyword search using OpenSearch.
+
+        This is useful for exact keyword matching, BM25 ranking,
+        and cases where semantic search might miss literal matches.
+
+        Args:
+            query: Search query
+            limit: Maximum results
+            strategy: Search strategy - 'bm25', 'fuzzy', 'phrase', 'multi_match', 'wildcard'
+            chunk_types: Filter by chunk types (content, heading, clause, metadata, summary)
+            filters: Additional metadata filters
+
+        Returns:
+            List of search results with scores
+        """
+        if not self.opensearch_store:
+            logger.warning("OpenSearch not available. Enable opensearch_enabled in config.")
+            return []
+
+        # Map strategy string to enum
+        strategy_map = {
+            'bm25': SearchStrategy.BM25,
+            'fuzzy': SearchStrategy.FUZZY,
+            'phrase': SearchStrategy.PHRASE,
+            'multi_match': SearchStrategy.MULTI_MATCH,
+            'wildcard': SearchStrategy.WILDCARD,
+            'combined': SearchStrategy.BOOL_COMBINED
+        }
+
+        search_strategy = strategy_map.get(strategy.lower(), SearchStrategy.MULTI_MATCH)
+
+        return self.opensearch_store.keyword_search(
+            self.config.opensearch_index,
+            query,
+            strategy=search_strategy,
+            size=limit,
+            chunk_types=chunk_types
+        )
+
+    def hybrid_search(
+        self,
+        query: str,
+        limit: int = 10,
+        vector_weight: float = 0.7,
+        keyword_weight: float = 0.3,
+        filters: Optional[Dict] = None
+    ) -> List[Dict]:
+        """
+        Perform hybrid search combining vector (semantic) and keyword search.
+
+        This combines the strengths of both approaches:
+        - Vector search finds semantically similar content
+        - Keyword search finds exact matches and handles specific terms
+
+        Args:
+            query: Search query
+            limit: Maximum results
+            vector_weight: Weight for vector search results (0-1)
+            keyword_weight: Weight for keyword search results (0-1)
+            filters: Metadata filters
+
+        Returns:
+            List of search results with combined scores
+        """
+        # Get vector search results
+        vector_results = self.search(
+            query,
+            limit=limit * 2,  # Get more to allow for merging
+            filters=filters
+        )
+
+        # Get keyword search results
+        keyword_results = []
+        if self.opensearch_store:
+            keyword_results = self.keyword_search(
+                query,
+                limit=limit * 2,
+                strategy='multi_match'
+            )
+
+        # Normalize and combine scores
+        combined_results = {}
+
+        # Process vector results
+        if vector_results:
+            max_vector_score = max(r.get('score', 0) for r in vector_results) or 1
+            for result in vector_results:
+                chunk_id = result.get('payload', {}).get('chunk_id') or result.get('id')
+                if chunk_id:
+                    normalized_score = (result.get('score', 0) / max_vector_score) * vector_weight
+                    combined_results[chunk_id] = {
+                        'result': result,
+                        'vector_score': result.get('score', 0),
+                        'keyword_score': 0,
+                        'combined_score': normalized_score
+                    }
+
+        # Process keyword results
+        if keyword_results:
+            max_keyword_score = max(r.get('score', 0) for r in keyword_results) or 1
+            for result in keyword_results:
+                chunk_id = result.get('source', {}).get('chunk_id')
+                if chunk_id:
+                    normalized_score = (result.get('score', 0) / max_keyword_score) * keyword_weight
+
+                    if chunk_id in combined_results:
+                        combined_results[chunk_id]['keyword_score'] = result.get('score', 0)
+                        combined_results[chunk_id]['combined_score'] += normalized_score
+                    else:
+                        combined_results[chunk_id] = {
+                            'result': {
+                                'id': chunk_id,
+                                'payload': result.get('source', {}),
+                                'score': result.get('score', 0)
+                            },
+                            'vector_score': 0,
+                            'keyword_score': result.get('score', 0),
+                            'combined_score': normalized_score
+                        }
+
+        # Sort by combined score and return top results
+        sorted_results = sorted(
+            combined_results.values(),
+            key=lambda x: x['combined_score'],
+            reverse=True
+        )[:limit]
+
+        # Format results
+        return [{
+            'id': r['result'].get('id'),
+            'payload': r['result'].get('payload', {}),
+            'score': r['combined_score'],
+            'vector_score': r['vector_score'],
+            'keyword_score': r['keyword_score'],
+            'search_type': 'hybrid'
+        } for r in sorted_results]
+
+    def search_headings(
+        self,
+        query: str,
+        limit: int = 20
+    ) -> List[Dict]:
+        """
+        Search only heading chunks - useful for TOC-style queries.
+
+        Args:
+            query: Search query
+            limit: Maximum results
+
+        Returns:
+            List of heading chunks matching the query
+        """
+        if not self.opensearch_store:
+            logger.warning("OpenSearch not available for heading search")
+            return []
+
+        return self.opensearch_store.search_headings_only(
+            self.config.opensearch_index,
+            query,
+            size=limit
+        )
+
+    def get_document_toc(self, doc_id: str) -> List[Dict]:
+        """
+        Get table of contents (all headings) for a document.
+
+        Args:
+            doc_id: Document ID
+
+        Returns:
+            List of heading chunks sorted by page number
+        """
+        if not self.opensearch_store:
+            logger.warning("OpenSearch not available for TOC retrieval")
+            return []
+
+        return self.opensearch_store.get_document_sections(
+            self.config.opensearch_index,
+            doc_id
+        )
+
+    def get_opensearch_stats(self) -> Dict:
+        """Get OpenSearch index statistics."""
+        if not self.opensearch_store:
+            return {'available': False}
+
+        try:
+            stats = self.opensearch_store.get_stats(self.config.opensearch_index)
+            stats['available'] = True
+            return stats
+        except Exception as e:
+            logger.error(f"Failed to get OpenSearch stats: {e}")
+            return {'available': False, 'error': str(e)}
 
 
 # Convenience functions
