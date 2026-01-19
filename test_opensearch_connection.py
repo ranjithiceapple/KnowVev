@@ -20,7 +20,7 @@ except ImportError:
     OPENSEARCH_INSTALLED = False
 
 
-def test_basic_connection(host: str, port: int, username: str, password: str, use_ssl: bool):
+def test_basic_connection(host: str, port: int, username: str, password: str, use_ssl: bool, no_auth: bool = False):
     """Test basic OpenSearch connection."""
     print(f"\n{'='*60}")
     print("OPENSEARCH CONNECTION TEST")
@@ -36,12 +36,12 @@ def test_basic_connection(host: str, port: int, username: str, password: str, us
 
     # Test connection
     print(f"\n[2] Connecting to OpenSearch at {host}:{port}...")
-    print(f"    SSL: {use_ssl}, Username: {username}")
+    print(f"    SSL: {use_ssl}, Auth: {'disabled' if no_auth else username}")
 
     try:
         client = OpenSearch(
             hosts=[{'host': host, 'port': port}],
-            http_auth=(username, password) if username else None,
+            http_auth=(username, password) if (username and not no_auth) else None,
             use_ssl=use_ssl,
             verify_certs=False,
             ssl_show_warn=False,
@@ -209,6 +209,7 @@ def main():
     parser.add_argument("--username", default="admin", help="Username (default: admin)")
     parser.add_argument("--password", default="admin", help="Password (default: admin)")
     parser.add_argument("--no-ssl", action="store_true", help="Disable SSL")
+    parser.add_argument("--no-auth", action="store_true", help="Disable authentication (for OpenSearch with security disabled)")
     parser.add_argument("--full", action="store_true", help="Run full test suite including keyword store")
 
     args = parser.parse_args()
@@ -220,14 +221,14 @@ def main():
     print("="*60)
     print(f"Host: {args.host}")
     print(f"Port: {args.port}")
-    print(f"Username: {args.username}")
+    print(f"Username: {'(disabled)' if args.no_auth else args.username}")
     print(f"SSL: {use_ssl}")
 
     # Run tests
     success = True
 
     # Basic connection test
-    if not test_basic_connection(args.host, args.port, args.username, args.password, use_ssl):
+    if not test_basic_connection(args.host, args.port, args.username, args.password, use_ssl, args.no_auth):
         success = False
         print("\nBasic connection test FAILED. Fix connection issues before proceeding.")
         sys.exit(1)

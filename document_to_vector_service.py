@@ -62,13 +62,15 @@ class ServiceConfig:
     qdrant_api_key: Optional[str] = None
 
     # OpenSearch settings (for hybrid keyword search)
+    # Can be overridden by environment variables: OPENSEARCH_HOST, OPENSEARCH_PORT,
+    # OPENSEARCH_USERNAME, OPENSEARCH_PASSWORD
     opensearch_enabled: bool = True
     opensearch_host: str = "localhost"
     opensearch_port: int = 9200
-    opensearch_username: Optional[str] = "admin"      # Default OpenSearch Docker credentials
-    opensearch_password: Optional[str] = "admin"      # Default OpenSearch Docker credentials
-    opensearch_use_ssl: bool = True                   # OpenSearch Docker uses SSL by default
-    opensearch_verify_certs: bool = False             # Disable cert verification for self-signed certs
+    opensearch_username: Optional[str] = "admin"           # Default OpenSearch username
+    opensearch_password: Optional[str] = "ArivurAI@123"    # Your OpenSearch Docker password
+    opensearch_use_ssl: bool = True                        # OpenSearch Docker uses SSL by default
+    opensearch_verify_certs: bool = False                  # Disable cert verification for self-signed certs
     opensearch_index: str = "document_keywords"
 
     # Hybrid chunking settings (for OpenSearch)
