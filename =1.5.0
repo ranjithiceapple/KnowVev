@@ -1,5 +1,0 @@
-Requirement already satisfied: scikit-learn in ./know_venv/lib/python3.10/site-packages (1.7.2)
-Requirement already satisfied: scipy in ./know_venv/lib/python3.10/site-packages (1.15.3)
-Requirement already satisfied: joblib in ./know_venv/lib/python3.10/site-packages (1.5.3)
-Requirement already satisfied: threadpoolctl>=3.1.0 in ./know_venv/lib/python3.10/site-packages (from scikit-learn) (3.6.0)
-Requirement already satisfied: numpy>=1.22.0 in ./know_venv/lib/python3.10/site-packages (from scikit-learn) (1.26.4)
