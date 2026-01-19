@@ -65,9 +65,10 @@ class ServiceConfig:
     opensearch_enabled: bool = True
     opensearch_host: str = "localhost"
     opensearch_port: int = 9200
-    opensearch_username: Optional[str] = None
-    opensearch_password: Optional[str] = None
-    opensearch_use_ssl: bool = False
+    opensearch_username: Optional[str] = "admin"      # Default OpenSearch Docker credentials
+    opensearch_password: Optional[str] = "admin"      # Default OpenSearch Docker credentials
+    opensearch_use_ssl: bool = True                   # OpenSearch Docker uses SSL by default
+    opensearch_verify_certs: bool = False             # Disable cert verification for self-signed certs
     opensearch_index: str = "document_keywords"
 
     # Hybrid chunking settings (for OpenSearch)
@@ -315,7 +316,8 @@ class DocumentToVectorService:
                         port=self.config.opensearch_port,
                         username=self.config.opensearch_username,
                         password=self.config.opensearch_password,
-                        use_ssl=self.config.opensearch_use_ssl
+                        use_ssl=self.config.opensearch_use_ssl,
+                        verify_certs=self.config.opensearch_verify_certs
                     )
 
                     # Ensure index exists
