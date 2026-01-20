@@ -1282,19 +1282,45 @@ class EnterpriseChunkingPipeline:
         """
         clause_chunks = []
 
-        # Sentence splitting pattern (handles common abbreviations)
-        sentence_pattern = re.compile(
-            r'(?<!\b(?:Mr|Mrs|Ms|Dr|Prof|Inc|Ltd|Corp|vs|etc|i\.e|e\.g))'
-            r'(?<=[.!?])\s+(?=[A-Z])'
-        )
+        # Common abbreviations that shouldn't end sentences
+        abbreviations = {'Mr', 'Mrs', 'Ms', 'Dr', 'Prof', 'Inc', 'Ltd', 'Corp', 'vs', 'etc', 'Sr', 'Jr', 'Fig', 'No', 'Vol'}
+
+        def split_into_sentences(text: str) -> List[str]:
+            """Split text into sentences, respecting abbreviations."""
+            # Simple sentence boundary pattern
+            potential_splits = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text)
+
+            # Rejoin splits that were false positives (abbreviations)
+            sentences = []
+            buffer = ""
+
+            for segment in potential_splits:
+                if buffer:
+                    # Check if previous segment ended with an abbreviation
+                    words = buffer.rstrip('.!?').split()
+                    last_word = words[-1] if words else ""
+
+                    if last_word.rstrip('.') in abbreviations:
+                        # False positive - rejoin
+                        buffer = buffer + " " + segment
+                    else:
+                        sentences.append(buffer)
+                        buffer = segment
+                else:
+                    buffer = segment
+
+            if buffer:
+                sentences.append(buffer)
+
+            return sentences
 
         for content_chunk in content_chunks:
             text = content_chunk.normalized_text
             if not text or len(text) < self.config.clause_min_length:
                 continue
 
-            # Split into sentences
-            sentences = sentence_pattern.split(text)
+            # Split into sentences using abbreviation-aware function
+            sentences = split_into_sentences(text)
             sentences = [s.strip() for s in sentences if s.strip()]
 
             if not sentences:
@@ -1486,18 +1512,17 @@ class EnterpriseChunkingPipeline:
         """
         summary_chunks = []
 
-        # Sentence pattern for extraction
-        sentence_pattern = re.compile(
-            r'(?<!\b(?:Mr|Mrs|Ms|Dr|Prof|Inc|Ltd|Corp|vs|etc|i\.e|e\.g))'
-            r'(?<=[.!?])\s+(?=[A-Z])'
-        )
+        # Simple sentence splitting function
+        def split_sentences(text: str) -> List[str]:
+            """Split text into sentences using simple pattern."""
+            parts = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text)
+            return [s.strip() for s in parts if s.strip() and len(s.strip()) > 20]
 
         # Generate document-level summary
         if self.config.generate_document_summary:
             # Collect text from first few content chunks
             doc_text = " ".join([c.normalized_text for c in content_chunks[:5]])
-            sentences = sentence_pattern.split(doc_text)
-            sentences = [s.strip() for s in sentences if s.strip() and len(s.strip()) > 20]
+            sentences = split_sentences(doc_text)
 
             # Take first N sentences as summary
             summary_sentences = sentences[:self.config.summary_sentences]
@@ -1540,8 +1565,7 @@ class EnterpriseChunkingPipeline:
 
                 # Combine section text
                 section_text = " ".join([c.normalized_text for c in section_chunks])
-                sentences = sentence_pattern.split(section_text)
-                sentences = [s.strip() for s in sentences if s.strip() and len(s.strip()) > 20]
+                sentences = split_sentences(section_text)
 
                 # Take first N sentences as section summary
                 summary_sentences = sentences[:self.config.summary_sentences]
