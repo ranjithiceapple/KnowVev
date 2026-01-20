@@ -380,26 +380,44 @@ class DocumentToVectorService:
         file_path: str,
         doc_id: Optional[str] = None,
         project_id: Optional[str] = None,
-        custom_metadata: Optional[Dict] = None
+        custom_metadata: Optional[Dict] = None,
+        enforce_contract: bool = True
     ) -> ProcessingResult:
         """
         Process a document through the complete pipeline.
 
+        IMPORTANT: In production, use `ingest_document()` instead which enforces
+        mandatory metadata validation.
+
         Args:
             file_path: Path to document file
-            doc_id: Optional document ID (generated if not provided)
-            project_id: Optional project ID for multi-tenancy/data isolation
+            doc_id: Document ID (REQUIRED when enforce_contract=True)
+            project_id: Project ID for multi-tenancy/data isolation (REQUIRED when enforce_contract=True)
             custom_metadata: Optional custom metadata to attach
+            enforce_contract: If True (default), requires doc_id and project_id
 
         Returns:
             ProcessingResult with statistics and timing
+
+        Raises:
+            IngestionMissingMetadataError: If enforce_contract=True and doc_id/project_id are missing
         """
         start_time = time.time()
 
-        # Generate doc_id if not provided
-        if doc_id is None:
-            doc_id = str(uuid.uuid4())
-            logger.debug(f"Generated doc_id: {doc_id}")
+        # ENFORCE CONTRACT: Require mandatory metadata
+        if enforce_contract:
+            if not doc_id:
+                raise IngestionMissingMetadataError("doc_id")
+            if not project_id:
+                raise IngestionMissingMetadataError("project_id")
+            logger.info(f"[Contract] Validated mandatory metadata - doc_id: {doc_id}, project_id: {project_id}")
+        else:
+            # Legacy mode - generate doc_id if not provided (DEPRECATED)
+            if doc_id is None:
+                doc_id = str(uuid.uuid4())
+                logger.warning(f"[DEPRECATED] Auto-generated doc_id: {doc_id}. Use ingest_document() with explicit IDs.")
+            if project_id is None:
+                logger.warning(f"[DEPRECATED] No project_id provided. Data will NOT be scoped to a project.")
 
         file_name = Path(file_path).name
 
@@ -623,7 +641,10 @@ class DocumentToVectorService:
             stage_start = time.time()
 
             # Prepare metadata to inject into all chunks
-            metadata_to_inject = {}
+            metadata_to_inject = {
+                'doc_id': doc_id,  # MANDATORY: Ensure consistent doc_id
+                'schema_version': INGESTION_SCHEMA_VERSION  # Schema versioning
+            }
 
             # Add project_id if provided (for multi-tenancy)
             if project_id:
@@ -634,11 +655,13 @@ class DocumentToVectorService:
             if custom_metadata:
                 metadata_to_inject.update(custom_metadata)
 
-            # Inject metadata into all embedding records
-            if metadata_to_inject:
-                for record in embedding_records:
-                    record.embedding_metadata.update(metadata_to_inject)
-                logger.debug(f"[{doc_id}] Injected metadata into {len(embedding_records)} records")
+            # CRITICAL: Inject metadata into ALL embedding records
+            for record in embedding_records:
+                record.embedding_metadata.update(metadata_to_inject)
+                # Ensure non-negative chunk_index
+                if record.embedding_metadata.get('chunk_index', 0) < 0:
+                    record.embedding_metadata['chunk_index'] = 0
+            logger.debug(f"[{doc_id}] Injected mandatory metadata into {len(embedding_records)} records")
 
             # Collect all embedding_ids for Base Model tracking
             vector_ids = [record.embedding_id for record in embedding_records]
@@ -685,6 +708,17 @@ class DocumentToVectorService:
                         doc_id=doc_id,
                         normalized_text=normalized_text
                     )
+
+                    # CRITICAL: Inject project_id into ALL OpenSearch documents
+                    if project_id:
+                        for chunk_type, chunk_list in hybrid_chunks.items():
+                            for chunk in chunk_list:
+                                chunk['project_id'] = project_id
+                                chunk['schema_version'] = INGESTION_SCHEMA_VERSION
+                                # Ensure non-negative chunk_index
+                                if chunk.get('chunk_index', 0) < 0:
+                                    chunk['chunk_index'] = 0
+                        logger.info(f"[{doc_id}] Injected project_id into all OpenSearch documents")
 
                     # Index hybrid chunks in OpenSearch
                     opensearch_stats = self.opensearch_store.index_hybrid_chunks(
