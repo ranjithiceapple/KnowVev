@@ -29,6 +29,24 @@ from embedding_preparation import prepare_for_embedding
 from qdrant_storage import QdrantStorage, QdrantConfig, setup_qdrant_collection
 from document_summarizer import DocumentSummarizer
 
+# Import ingestion contract for production-grade validation
+from ingestion_contract import (
+    IngestionRequest,
+    IngestionResponse,
+    IngestionResult,
+    IngestionStatus,
+    IngestionError,
+    IngestionValidationError,
+    IngestionMissingMetadataError,
+    VectorPayloadContract,
+    OpenSearchDocumentContract,
+    ChunkIndexGenerator,
+    ChunkType as ContractChunkType,
+    validate_ingestion_request,
+    create_failed_response,
+    INGESTION_SCHEMA_VERSION
+)
+
 # Import OpenSearch for hybrid search
 try:
     from opensearch_keyword_store import (
@@ -732,6 +750,398 @@ class DocumentToVectorService:
 
         return result
 
+    def process_document_v2(
+        self,
+        request: IngestionRequest
+    ) -> IngestionResponse:
+        """
+        Process a document using the production-grade ingestion contract.
+
+        This method enforces mandatory metadata validation (project_id, doc_id)
+        and uses consistent payload contracts for Qdrant and OpenSearch.
+
+        CRITICAL: This method FAILS FAST if required metadata is missing.
+
+        The IngestionRequest must be created with:
+        - file_path: Path to document file (MANDATORY)
+        - doc_id: Document ID from API service (MANDATORY)
+        - project_id: Project ID for data isolation (MANDATORY)
+
+        Args:
+            request: Validated IngestionRequest object
+
+        Returns:
+            IngestionResponse with complete processing details
+
+        Raises:
+            IngestionValidationError: If request validation fails
+        """
+        start_time = time.time()
+
+        # Log request details
+        logger.info(
+            f"[{request.request_id[:8]}] Starting v2 ingestion pipeline "
+            f"- doc_id: {request.doc_id}, project_id: {request.project_id}"
+        )
+
+        # Initialize response
+        response = IngestionResponse(
+            request_id=request.request_id,
+            doc_id=request.doc_id,
+            project_id=request.project_id,
+            file_name=request.file_name,
+            status=IngestionStatus.FAILED,
+            success=False
+        )
+
+        # Initialize chunk index generator for consistent non-negative indices
+        index_generator = ChunkIndexGenerator(request.doc_id, request.project_id)
+
+        try:
+            # ================================================================
+            # STAGE 1: EXTRACT DOCUMENT
+            # ================================================================
+            logger.info(f"[{request.doc_id}] Stage 1/6: Extracting document...")
+            stage_start = time.time()
+
+            extraction_result = extract_text_from_document(
+                request.file_path,
+                extract_metadata=True
+            )
+
+            response.pages_extracted = extraction_result.metadata.total_pages
+            response.extraction_time = time.time() - stage_start
+
+            logger.info(f"[{request.doc_id}] ✅ Extracted {response.pages_extracted} pages in {response.extraction_time:.2f}s")
+
+            # ================================================================
+            # STAGE 2: NORMALIZE TEXT
+            # ================================================================
+            logger.info(f"[{request.doc_id}] Stage 2/6: Normalizing text...")
+            stage_start = time.time()
+
+            norm_config = NormalizationConfig(
+                normalize_line_breaks=True,
+                remove_hyphen_line_breaks=True,
+                collapse_whitespace=True,
+                unicode_normalize=True,
+                remove_urls=True,
+                remove_page_numbers=True,
+                remove_headers_footers=True,
+                remove_toc_pages=self.config.remove_toc_pages,
+                protect_headings=self.config.protect_headings,
+                protect_tables=self.config.protect_tables,
+                protect_code_blocks=self.config.protect_code_blocks,
+                detect_multi_column=self.config.detect_multi_column,
+                preserve_hierarchy=True,
+                add_page_markers=True,
+            )
+
+            normalized_text, page_results, norm_stats = normalize_with_metadata(
+                extraction_result,
+                norm_config
+            )
+
+            normalization_time = time.time() - stage_start
+            logger.info(f"[{request.doc_id}] ✅ Normalized in {normalization_time:.2f}s")
+
+            # ================================================================
+            # STAGE 3: CHUNK DOCUMENT
+            # ================================================================
+            logger.info(f"[{request.doc_id}] Stage 3/6: Chunking document...")
+            stage_start = time.time()
+
+            chunk_config = ChunkingConfig(
+                max_chunk_size=self.config.max_chunk_size,
+                target_chunk_size=self.config.target_chunk_size,
+                enable_overlap=self.config.enable_overlap,
+                overlap_size=self.config.overlap_size,
+                overlap_strategy="sentence",
+                respect_page_boundaries=self.config.respect_page_boundaries,
+                keep_tables_intact=self.config.keep_tables_intact,
+                keep_code_blocks_intact=self.config.protect_code_blocks,
+            )
+
+            chunks = chunk_with_normalization(
+                extraction_result,
+                normalized_text,
+                chunk_config
+            )
+
+            response.chunks_created = len(chunks)
+            response.chunking_time = time.time() - stage_start
+
+            logger.info(f"[{request.doc_id}] ✅ Created {response.chunks_created} chunks in {response.chunking_time:.2f}s")
+
+            # ================================================================
+            # STAGE 3.5: GENERATE DOCUMENT SUMMARY (Virtual Chunk)
+            # ================================================================
+            document_title = request.document_title
+
+            if self.config.generate_document_summary:
+                logger.info(f"[{request.doc_id}] Stage 3.5/6: Generating document summary...")
+                stage_start = time.time()
+
+                summarizer = DocumentSummarizer(
+                    max_summary_length=self.config.summary_max_length,
+                    method=self.config.summary_method
+                )
+
+                document_summary = summarizer.generate_summary(
+                    chunks=chunks,
+                    extraction_result=extraction_result,
+                    doc_id=request.doc_id,
+                    file_name=request.file_name
+                )
+
+                # Create summary chunk with non-negative index (index 0)
+                summary_chunk = summarizer.create_summary_chunk(document_summary)
+                # Override the chunk_index to ensure it's 0, not -1
+                summary_chunk.chunk_index = index_generator.next_index(ContractChunkType.SUMMARY)
+                summary_chunk.chunk_type = ContractChunkType.SUMMARY.value
+
+                # Use document title from summary if not provided
+                if not document_title:
+                    document_title = document_summary.document_title
+
+                chunks = [summary_chunk] + chunks
+                response.summary_chunks = 1
+
+                summary_time = time.time() - stage_start
+                logger.info(f"[{request.doc_id}] ✅ Generated summary in {summary_time:.2f}s")
+
+            # ================================================================
+            # STAGE 4: PREPARE EMBEDDINGS WITH CONTRACT PAYLOADS
+            # ================================================================
+            logger.info(f"[{request.doc_id}] Stage 4/6: Preparing embeddings with contract payloads...")
+            stage_start = time.time()
+
+            embedding_records, dedup_stats = prepare_for_embedding(
+                chunks,
+                deduplicate=self.config.deduplicate_chunks,
+                aggressive_cleaning=self.config.aggressive_text_cleaning,
+                version=self.config.version
+            )
+
+            response.unique_chunks = dedup_stats.unique_chunks
+
+            # CRITICAL: Inject mandatory metadata into ALL embedding records
+            # This ensures project_id is stored in EVERY Qdrant vector
+            for i, record in enumerate(embedding_records):
+                # Generate consistent chunk index
+                chunk_type = ContractChunkType.CONTENT
+                if hasattr(record, 'chunk_type'):
+                    chunk_type_str = getattr(record, 'chunk_type', 'content')
+                    if chunk_type_str in [ct.value for ct in ContractChunkType]:
+                        chunk_type = ContractChunkType(chunk_type_str)
+
+                # Ensure non-negative chunk_index
+                if record.embedding_metadata.get('chunk_index', 0) < 0:
+                    record.embedding_metadata['chunk_index'] = index_generator.next_index(chunk_type)
+
+                # MANDATORY: Inject project_id into every record
+                record.embedding_metadata['project_id'] = request.project_id
+                record.embedding_metadata['doc_id'] = request.doc_id
+
+                # Add custom metadata if provided
+                if request.custom_metadata:
+                    record.embedding_metadata.update(request.custom_metadata)
+
+                # Add schema version for tracking
+                record.embedding_metadata['schema_version'] = INGESTION_SCHEMA_VERSION
+                record.embedding_metadata['document_title'] = document_title
+
+            # Generate embeddings
+            texts = [record.embedding_input_text for record in embedding_records]
+            embeddings = self.embedding_model.encode(
+                texts,
+                show_progress_bar=False,
+                convert_to_numpy=True
+            )
+            embeddings = [emb.tolist() for emb in embeddings]
+
+            response.embedding_time = time.time() - stage_start
+            logger.info(f"[{request.doc_id}] ✅ Generated {len(embeddings)} embeddings in {response.embedding_time:.2f}s")
+
+            # ================================================================
+            # STAGE 5: STORE IN QDRANT
+            # ================================================================
+            logger.info(f"[{request.doc_id}] Stage 5/6: Storing in Qdrant...")
+            stage_start = time.time()
+
+            # Collect vector IDs for tracking
+            vector_ids = [record.embedding_id for record in embedding_records]
+            response.vector_ids = vector_ids
+
+            upload_stats = self.storage.store_embeddings(
+                embedding_records,
+                embeddings,
+                show_progress=False
+            )
+
+            response.qdrant_time = time.time() - stage_start
+            response.qdrant_result = IngestionResult(
+                backend='qdrant',
+                success=True,
+                items_stored=upload_stats['uploaded'],
+                items_failed=upload_stats.get('failed', 0)
+            )
+
+            logger.info(f"[{request.doc_id}] ✅ Stored {upload_stats['uploaded']} vectors in Qdrant in {response.qdrant_time:.2f}s")
+
+            # ================================================================
+            # STAGE 6: INDEX IN OPENSEARCH (Hybrid Keyword Search)
+            # ================================================================
+            if self.opensearch_store and self.config.opensearch_enabled:
+                logger.info(f"[{request.doc_id}] Stage 6/6: Indexing in OpenSearch...")
+                stage_start = time.time()
+
+                try:
+                    # Create hybrid chunking config
+                    hybrid_chunk_config = ChunkingConfig(
+                        max_chunk_size=self.config.max_chunk_size,
+                        target_chunk_size=self.config.target_chunk_size,
+                        enable_overlap=self.config.enable_overlap,
+                        overlap_size=self.config.overlap_size,
+                        generate_heading_chunks=self.config.generate_heading_chunks,
+                        generate_clause_chunks=self.config.generate_clause_chunks,
+                        generate_metadata_chunks=self.config.generate_metadata_chunks,
+                        generate_summary_chunks=self.config.generate_summary_chunks
+                    )
+
+                    # Create pipeline and generate hybrid chunks
+                    hybrid_pipeline = EnterpriseChunkingPipeline(hybrid_chunk_config)
+                    hybrid_chunks = hybrid_pipeline.generate_hybrid_chunks(
+                        extraction_result,
+                        doc_id=request.doc_id,
+                        normalized_text=normalized_text
+                    )
+
+                    # CRITICAL: Inject project_id into ALL OpenSearch documents
+                    for chunk_type, chunk_list in hybrid_chunks.items():
+                        for chunk in chunk_list:
+                            chunk['project_id'] = request.project_id
+                            chunk['schema_version'] = INGESTION_SCHEMA_VERSION
+                            # Ensure non-negative chunk_index
+                            if chunk.get('chunk_index', 0) < 0:
+                                chunk['chunk_index'] = 0
+
+                    # Index hybrid chunks
+                    opensearch_stats = self.opensearch_store.index_hybrid_chunks(
+                        self.config.opensearch_index,
+                        hybrid_chunks,
+                        doc_id=request.doc_id
+                    )
+
+                    # Update statistics
+                    response.content_chunks = len(hybrid_chunks.get('content', []))
+                    response.heading_chunks = len(hybrid_chunks.get('heading', []))
+                    response.clause_chunks = len(hybrid_chunks.get('clause', []))
+                    response.metadata_chunks = len(hybrid_chunks.get('metadata', []))
+                    response.summary_chunks = len(hybrid_chunks.get('summary', []))
+
+                    response.opensearch_time = time.time() - stage_start
+                    response.opensearch_result = IngestionResult(
+                        backend='opensearch',
+                        success=True,
+                        items_stored=opensearch_stats.get('success', 0),
+                        items_failed=opensearch_stats.get('failed', 0)
+                    )
+
+                    logger.info(
+                        f"[{request.doc_id}] ✅ Indexed {opensearch_stats.get('success', 0)} chunks in OpenSearch "
+                        f"in {response.opensearch_time:.2f}s"
+                    )
+
+                except Exception as e:
+                    logger.error(f"[{request.doc_id}] OpenSearch indexing failed: {e}", exc_info=True)
+                    response.opensearch_time = time.time() - stage_start
+                    response.opensearch_result = IngestionResult(
+                        backend='opensearch',
+                        success=False,
+                        error_message=str(e)
+                    )
+
+            # ================================================================
+            # SUCCESS
+            # ================================================================
+            response.status = IngestionStatus.SUCCESS
+            response.success = True
+            response.total_time = time.time() - start_time
+
+            logger.info(
+                f"[{request.doc_id}] ✅ V2 INGESTION COMPLETE in {response.total_time:.2f}s - "
+                f"project_id: {request.project_id}, vectors: {response.qdrant_result.items_stored if response.qdrant_result else 0}"
+            )
+
+        except Exception as e:
+            response.success = False
+            response.status = IngestionStatus.FAILED
+            response.error_message = str(e)
+            response.total_time = time.time() - start_time
+
+            # Determine stage where error occurred
+            if response.pages_extracted == 0:
+                response.error_stage = "extraction"
+            elif response.chunks_created == 0:
+                response.error_stage = "normalization_or_chunking"
+            elif response.unique_chunks == 0:
+                response.error_stage = "embedding_preparation"
+            elif response.qdrant_result is None:
+                response.error_stage = "qdrant_storage"
+            else:
+                response.error_stage = "opensearch_storage"
+
+            logger.error(f"[{request.doc_id}] ❌ V2 INGESTION FAILED at {response.error_stage}: {e}")
+
+        return response
+
+    def ingest_document(
+        self,
+        file_path: str,
+        doc_id: str,
+        project_id: str,
+        file_name: Optional[str] = None,
+        document_title: Optional[str] = None,
+        custom_metadata: Optional[Dict[str, Any]] = None
+    ) -> IngestionResponse:
+        """
+        Production-grade document ingestion with mandatory metadata validation.
+
+        This is the RECOMMENDED method for production use. It enforces:
+        - Mandatory project_id and doc_id
+        - Consistent payload contracts
+        - Non-negative chunk indices
+        - Fail-fast validation
+
+        Args:
+            file_path: Path to document file (MANDATORY)
+            doc_id: Document ID from API service (MANDATORY)
+            project_id: Project ID for data isolation (MANDATORY)
+            file_name: Optional human-readable file name
+            document_title: Optional clean document title
+            custom_metadata: Optional additional metadata
+
+        Returns:
+            IngestionResponse with complete processing details
+
+        Raises:
+            IngestionMissingMetadataError: If doc_id or project_id is missing
+            IngestionValidationError: If validation fails
+        """
+        # Validate and create request - FAILS FAST if invalid
+        request = validate_ingestion_request(
+            file_path=file_path,
+            doc_id=doc_id,
+            project_id=project_id,
+            file_name=file_name,
+            document_title=document_title,
+            custom_metadata=custom_metadata
+        )
+
+        # Process using v2 pipeline
+        return self.process_document_v2(request)
+
     def process_multiple_documents(
         self,
         file_paths: List[str],
@@ -781,13 +1191,87 @@ class DocumentToVectorService:
 
         return results
 
+    def ingest_multiple_documents(
+        self,
+        requests: List[IngestionRequest],
+        show_progress: bool = True,
+        fail_on_validation_error: bool = True
+    ) -> List[IngestionResponse]:
+        """
+        Process multiple documents using the production-grade ingestion contract.
+
+        This is the RECOMMENDED method for batch production ingestion.
+        All documents MUST have valid project_id and doc_id.
+
+        Args:
+            requests: List of IngestionRequest objects (already validated)
+            show_progress: Whether to show progress
+            fail_on_validation_error: If True, stops on first validation error
+
+        Returns:
+            List of IngestionResponse objects
+
+        Raises:
+            IngestionValidationError: If any request validation fails and fail_on_validation_error=True
+        """
+        responses = []
+        total = len(requests)
+
+        logger.info(f"Starting batch ingestion of {total} documents")
+
+        for i, request in enumerate(requests, 1):
+            if show_progress:
+                logger.info(f"\n{'='*80}")
+                logger.info(f"Document {i}/{total}: {request.file_name} (doc_id: {request.doc_id})")
+                logger.info(f"{'='*80}")
+
+            try:
+                response = self.process_document_v2(request)
+                responses.append(response)
+
+                if show_progress:
+                    if response.success:
+                        qdrant_stored = response.qdrant_result.items_stored if response.qdrant_result else 0
+                        logger.info(f"✅ Success: {qdrant_stored} vectors stored, project_id: {request.project_id}")
+                    else:
+                        logger.error(f"❌ Failed: {response.error_message}")
+
+            except IngestionValidationError as e:
+                if fail_on_validation_error:
+                    logger.error(f"Batch ingestion stopped due to validation error: {e}")
+                    raise
+                else:
+                    # Create failed response and continue
+                    failed_response = create_failed_response(request, str(e), "validation")
+                    responses.append(failed_response)
+                    logger.error(f"❌ Validation failed (continuing): {e}")
+
+        # Summary
+        successful = sum(1 for r in responses if r.success)
+        failed = total - successful
+        total_vectors = sum(
+            r.qdrant_result.items_stored if r.qdrant_result else 0
+            for r in responses
+        )
+
+        logger.info(f"\n{'='*80}")
+        logger.info(f"BATCH INGESTION COMPLETE (v2 Contract)")
+        logger.info(f"{'='*80}")
+        logger.info(f"Total documents: {total}")
+        logger.info(f"Successful: {successful}")
+        logger.info(f"Failed: {failed}")
+        logger.info(f"Total vectors stored: {total_vectors}")
+
+        return responses
+
     def search(
         self,
         query: str,
         limit: int = 10,
         filters: Optional[Dict] = None,
         score_threshold: Optional[float] = None,
-        expand_to_section: bool = False
+        expand_to_section: bool = False,
+        project_id: Optional[str] = None
     ) -> List[Dict]:
         """
         Search for documents.
@@ -798,10 +1282,16 @@ class DocumentToVectorService:
             filters: Optional metadata filters
             score_threshold: Minimum similarity score
             expand_to_section: If True, expands matched chunks to include all chunks from the same section using heading_path
+            project_id: Optional project ID filter for data isolation
 
         Returns:
             List of search results
         """
+        # Build filters with project_id if provided
+        search_filters = filters.copy() if filters else {}
+        if project_id:
+            search_filters['project_id'] = project_id
+
         # Generate query embedding
         query_embedding = self.embedding_model.encode([query])[0].tolist()
 
@@ -809,7 +1299,7 @@ class DocumentToVectorService:
         results = self.storage.search(
             query_vector=query_embedding,
             limit=limit,
-            filters=filters,
+            filters=search_filters if search_filters else None,
             score_threshold=score_threshold
         )
 
@@ -1192,7 +1682,8 @@ class DocumentToVectorService:
         limit: int = 10,
         vector_weight: float = 0.7,
         keyword_weight: float = 0.3,
-        filters: Optional[Dict] = None
+        filters: Optional[Dict] = None,
+        project_id: Optional[str] = None
     ) -> List[Dict]:
         """
         Perform hybrid search combining vector (semantic) and keyword search.
@@ -1207,15 +1698,17 @@ class DocumentToVectorService:
             vector_weight: Weight for vector search results (0-1)
             keyword_weight: Weight for keyword search results (0-1)
             filters: Metadata filters
+            project_id: Optional project ID filter for data isolation
 
         Returns:
             List of search results with combined scores
         """
-        # Get vector search results
+        # Get vector search results (project_id is passed through)
         vector_results = self.search(
             query,
             limit=limit * 2,  # Get more to allow for merging
-            filters=filters
+            filters=filters,
+            project_id=project_id
         )
 
         # Get keyword search results
