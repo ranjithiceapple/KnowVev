@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Query, Body
+from fastapi import FastAPI, File, UploadFile, HTTPException, Query, Body, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any, Union
@@ -259,25 +259,33 @@ def root():
 @app.post("/process")
 async def process_document(
     file: UploadFile = File(...),
-    project_id: Optional[str] = None,
+    doc_id: str = Form(..., description="Mandatory document ID from API service"),
+    project_id: str = Form(..., description="Mandatory project ID for data isolation"),
     debug: bool = False
 ):
     """
     Upload a document → Extract → Normalize → Chunk → Embed → Store in Qdrant
 
+    IMPORTANT: doc_id and project_id are MANDATORY for production use.
+    The ingestion pipeline will reject requests without these parameters.
+
     Args:
         file: Document file to process
-        project_id: Optional project ID for multi-tenancy and data isolation
+        doc_id: MANDATORY document ID (provided by your API service from Postgres)
+        project_id: MANDATORY project ID for multi-tenancy and data isolation
         debug: If True, saves pipeline stage outputs to pipeline_debug/ folder
 
     Multi-Tenancy:
-        When project_id is provided, all chunks from this document are tagged with the project_id.
-        This enables filtered searches where users only see documents from their own projects.
+        All chunks from this document are tagged with doc_id and project_id.
+        This enables:
+        - Filtered searches where users only see documents from their own projects
+        - Clean document deletion by doc_id
+        - Consistent identity across Qdrant and OpenSearch
     """
     start_time = time.time()
     logger.info(
         f"Document processing started - Filename: {file.filename}, "
-        f"Content-Type: {file.content_type}, Project ID: {project_id}, Debug mode: {debug}"
+        f"Content-Type: {file.content_type}, Doc ID: {doc_id}, Project ID: {project_id}, Debug mode: {debug}"
     )
 
     try:
@@ -301,10 +309,11 @@ async def process_document(
             debug_files = inspector.inspect_pipeline(temp_file_path)
             logger.info(f"Debug files created: {len(debug_files)} files in pipeline_debug/")
 
-        # Process document using the full pipeline
-        logger.info(f"Starting document processing pipeline for: {file.filename}")
+        # Process document using the full pipeline with mandatory metadata
+        logger.info(f"Starting document processing pipeline for: {file.filename} (doc_id: {doc_id}, project_id: {project_id})")
         result = service.process_document(
             file_path=temp_file_path,
+            doc_id=doc_id,
             project_id=project_id
         )
         logger.info(f"Document processing pipeline completed for: {file.filename}")
