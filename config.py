@@ -42,6 +42,30 @@ class Config:
     qdrant_url: str
     qdrant_api_key: Optional[str]
     qdrant_collection: str
+    qdrant_timeout: int
+    qdrant_retry_count: int
+
+    # OpenSearch Configuration (for Hybrid Search)
+    opensearch_enabled: bool
+    opensearch_host: str
+    opensearch_port: int
+    opensearch_username: Optional[str]
+    opensearch_password: Optional[str]
+    opensearch_use_ssl: bool
+    opensearch_verify_certs: bool
+    opensearch_ssl_show_warn: bool
+    opensearch_index: str
+    opensearch_timeout: int
+    opensearch_max_retries: int
+
+    # Hybrid Search Configuration
+    generate_heading_chunks: bool
+    generate_clause_chunks: bool
+    generate_metadata_chunks: bool
+    generate_summary_chunks: bool
+    keyword_max_keywords: int
+    keyword_min_word_length: int
+    keyword_include_phrases: bool
 
     # Embedding Configuration
     embedding_model: str
@@ -114,18 +138,42 @@ def load_config() -> Config:
         # Qdrant
         qdrant_url=os.getenv("QDRANT_URL", "http://localhost:6333"),
         qdrant_api_key=os.getenv("QDRANT_API_KEY") or None,
-        qdrant_collection=os.getenv("QDRANT_COLLECTION", "knowvec_documents"),
+        qdrant_collection=os.getenv("QDRANT_COLLECTION", "documents"),
+        qdrant_timeout=get_int("QDRANT_TIMEOUT", 5),
+        qdrant_retry_count=get_int("QDRANT_RETRY_COUNT", 3),
+
+        # OpenSearch (for Hybrid Search)
+        opensearch_enabled=get_bool("OPENSEARCH_ENABLED", True),
+        opensearch_host=os.getenv("OPENSEARCH_HOST", "localhost"),
+        opensearch_port=get_int("OPENSEARCH_PORT", 9200),
+        opensearch_username=os.getenv("OPENSEARCH_USERNAME", "admin"),
+        opensearch_password=os.getenv("OPENSEARCH_PASSWORD", "ArivurAI@123"),
+        opensearch_use_ssl=get_bool("OPENSEARCH_USE_SSL", False),
+        opensearch_verify_certs=get_bool("OPENSEARCH_VERIFY_CERTS", False),
+        opensearch_ssl_show_warn=get_bool("OPENSEARCH_SSL_SHOW_WARN", False),
+        opensearch_index=os.getenv("OPENSEARCH_INDEX", "knowvec_keywords"),
+        opensearch_timeout=get_int("OPENSEARCH_TIMEOUT", 30),
+        opensearch_max_retries=get_int("OPENSEARCH_MAX_RETRIES", 3),
+
+        # Hybrid Search Chunk Generation
+        generate_heading_chunks=get_bool("GENERATE_HEADING_CHUNKS", True),
+        generate_clause_chunks=get_bool("GENERATE_CLAUSE_CHUNKS", True),
+        generate_metadata_chunks=get_bool("GENERATE_METADATA_CHUNKS", True),
+        generate_summary_chunks=get_bool("GENERATE_SUMMARY_CHUNKS", True),
+        keyword_max_keywords=get_int("KEYWORD_MAX_KEYWORDS", 50),
+        keyword_min_word_length=get_int("KEYWORD_MIN_WORD_LENGTH", 3),
+        keyword_include_phrases=get_bool("KEYWORD_INCLUDE_PHRASES", True),
 
         # Embedding
-        embedding_model=os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2"),
-        embedding_dimension=get_int("EMBEDDING_DIMENSION", 384),
+        embedding_model=os.getenv("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"),
+        embedding_dimension=get_int("EMBEDDING_DIMENSION", 768),
         embedding_batch_size=get_int("EMBEDDING_BATCH_SIZE", 32),
 
         # Processing
-        max_chunk_size=get_int("MAX_CHUNK_SIZE", 1000),
-        target_chunk_size=get_int("TARGET_CHUNK_SIZE", 800),
+        max_chunk_size=get_int("MAX_CHUNK_SIZE", 1500),
+        target_chunk_size=get_int("TARGET_CHUNK_SIZE", 1200),
         enable_overlap=get_bool("ENABLE_OVERLAP", True),
-        overlap_size=get_int("OVERLAP_SIZE", 200),
+        overlap_size=get_int("OVERLAP_SIZE", 250),
         respect_page_boundaries=get_bool("RESPECT_PAGE_BOUNDARIES", False),
         keep_tables_intact=get_bool("KEEP_TABLES_INTACT", True),
         remove_toc_pages=get_bool("REMOVE_TOC_PAGES", True),
@@ -149,7 +197,7 @@ def load_config() -> Config:
 
         # API
         api_host=os.getenv("API_HOST", "0.0.0.0"),
-        api_port=get_int("API_PORT", 8000),
+        api_port=get_int("API_PORT", 8007),
         api_debug=get_bool("API_DEBUG", False),
         max_upload_size_mb=get_int("MAX_UPLOAD_SIZE_MB", 50),
         cors_origins=os.getenv("CORS_ORIGINS", "*"),
@@ -171,7 +219,7 @@ def load_config() -> Config:
         enable_topic_modeling=get_bool("ENABLE_TOPIC_MODELING", True),
         topic_n_topics=get_int("TOPIC_N_TOPICS", 10),
         topic_max_features=get_int("TOPIC_MAX_FEATURES", 5000),
-        topic_min_df=get_int("TOPIC_MIN_DF", 2),
+        topic_min_df=get_int("TOPIC_MIN_DF", 1),
         topic_max_df=get_float("TOPIC_MAX_DF", 0.85),
         topic_model_dir=os.getenv("TOPIC_MODEL_DIR", "models/topics"),
         topic_retrain_threshold_docs=get_int("TOPIC_RETRAIN_THRESHOLD_DOCS", 100),
@@ -207,12 +255,32 @@ if __name__ == "__main__":
     print(f"  Collection: {cfg.qdrant_collection}")
     print(f"  API Key: {'***' if cfg.qdrant_api_key else 'Not set'}")
 
+    print(f"\n🔍 OPENSEARCH (HYBRID SEARCH)")
+    print(f"  Enabled: {cfg.opensearch_enabled}")
+    print(f"  Host: {cfg.opensearch_host}:{cfg.opensearch_port}")
+    print(f"  Index: {cfg.opensearch_index}")
+    print(f"  Username: {cfg.opensearch_username}")
+    print(f"  Password: {'***' if cfg.opensearch_password else 'Not set'}")
+    print(f"  SSL: {cfg.opensearch_use_ssl}")
+    print(f"  Verify Certs: {cfg.opensearch_verify_certs}")
+    print(f"  Timeout: {cfg.opensearch_timeout}s")
+    print(f"  Max Retries: {cfg.opensearch_max_retries}")
+
+    print(f"\n🔧 HYBRID SEARCH CHUNKS")
+    print(f"  Heading Chunks: {cfg.generate_heading_chunks}")
+    print(f"  Clause Chunks: {cfg.generate_clause_chunks}")
+    print(f"  Metadata Chunks: {cfg.generate_metadata_chunks}")
+    print(f"  Summary Chunks: {cfg.generate_summary_chunks}")
+    print(f"  Max Keywords: {cfg.keyword_max_keywords}")
+    print(f"  Min Word Length: {cfg.keyword_min_word_length}")
+    print(f"  Include Phrases: {cfg.keyword_include_phrases}")
+
     print(f"\n🔢 EMBEDDING MODEL")
     print(f"  Model: {cfg.embedding_model}")
     print(f"  Dimension: {cfg.embedding_dimension}")
     print(f"  Batch Size: {cfg.embedding_batch_size}")
 
-    print(f"\n⚙️  PROCESSING")
+    print(f"\n⚙️ PROCESSING")
     print(f"  Max Chunk Size: {cfg.max_chunk_size}")
     print(f"  Target Chunk Size: {cfg.target_chunk_size}")
     print(f"  Overlap: {cfg.enable_overlap} ({cfg.overlap_size} chars)")
@@ -228,7 +296,7 @@ if __name__ == "__main__":
     print(f"  Method: {cfg.summary_method}")
     print(f"  Max Length: {cfg.summary_max_length} chars")
 
-    print(f"\n🔍 SEARCH")
+    print(f"\n🔎 SEARCH")
     print(f"  Min Similarity Score: {cfg.min_similarity_score}")
     print(f"  Default Limit: {cfg.default_search_limit}")
     print(f"  Max Limit: {cfg.max_search_limit}")
@@ -244,7 +312,7 @@ if __name__ == "__main__":
     print(f"  Workers: {cfg.num_workers}")
     print(f"  Cache Size: {cfg.cache_size}")
 
-    print(f"\n📝 LOGGING")
+    print(f"\n📋 LOGGING")
     print(f"  Level: {cfg.log_level}")
     print(f"  Format: {cfg.log_format}")
     print(f"  File Logging: {cfg.enable_file_logging}")
@@ -252,7 +320,12 @@ if __name__ == "__main__":
     print(f"  Show Progress: {cfg.show_progress}")
     print(f"  Timing Logs: {cfg.enable_timing_logs}")
 
-    print(f"\n🏷️  VERSION")
+    print(f"\n🏷️ TOPIC MODELING")
+    print(f"  Enabled: {cfg.enable_topic_modeling}")
+    print(f"  Number of Topics: {cfg.topic_n_topics}")
+    print(f"  Max Features: {cfg.topic_max_features}")
+
+    print(f"\n🏷️ VERSION")
     print(f"  Pipeline Version: {cfg.version}")
 
     print("=" * 80)
