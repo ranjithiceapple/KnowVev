@@ -542,8 +542,10 @@ class DocumentToVectorService:
             # ================================================================
             # STAGE 3.5: GENERATE DOCUMENT SUMMARY (Virtual Chunk)
             # ================================================================
+            # Extract document_title for citations
+            document_title = None
+
             if self.config.generate_document_summary:
-                logger.info(f"[{doc_id}] Stage 3.5/5: Generating document summary...")
                 stage_start = time.time()
 
                 summarizer = DocumentSummarizer(
@@ -551,7 +553,6 @@ class DocumentToVectorService:
                     method=self.config.summary_method
                 )
 
-                # Generate summary
                 document_summary = summarizer.generate_summary(
                     chunks=chunks,
                     extraction_result=extraction_result,
@@ -559,25 +560,27 @@ class DocumentToVectorService:
                     file_name=file_name
                 )
 
-                # Create virtual summary chunk
-                summary_chunk = summarizer.create_summary_chunk(document_summary)
+                # CRITICAL: Capture document_title for citations
+                document_title = document_summary.document_title
 
-                # Insert summary chunk at the beginning
+                summary_chunk = summarizer.create_summary_chunk(document_summary)
                 chunks = [summary_chunk] + chunks
 
-                # Update result statistics
                 result.summary_time = time.time() - stage_start
                 result.has_summary = True
                 result.summary_length = document_summary.summary_length
 
-                logger.info(
-                    f"[{doc_id}] ✅ Generated document summary in {result.summary_time:.2f}s "
-                    f"({document_summary.summary_length} chars, {document_summary.compression_ratio:.2%} compression)"
-                )
-                logger.info(f"[{doc_id}]    Title: {document_summary.document_title}")
-                logger.info(f"[{doc_id}]    Sections: {len(document_summary.main_sections)}")
-            else:
-                logger.info(f"[{doc_id}] Document summary generation disabled")
+            # If no summary, derive title from file_name
+            if not document_title:
+                # Clean file_name: remove UUID prefix and extension
+                document_title = file_name
+                if '_' in document_title and len(document_title.split('_')[0]) == 36:
+                    document_title = '_'.join(document_title.split('_')[1:])
+                # Remove extension
+                if '.' in document_title:
+                    document_title = document_title.rsplit('.', 1)[0]
+                # Replace underscores with spaces
+                document_title = document_title.replace('_', ' ')
 
             # ================================================================
             # STAGE 4: PREPARE FOR EMBEDDING
@@ -667,13 +670,14 @@ class DocumentToVectorService:
             # Prepare metadata to inject into all chunks
             metadata_to_inject = {
                 'doc_id': doc_id,  # MANDATORY: Ensure consistent doc_id
-                'schema_version': INGESTION_SCHEMA_VERSION  # Schema versioning
+                'schema_version': INGESTION_SCHEMA_VERSION,  # Schema versioning
+                'document_title': document_title,  # CRITICAL: For citations
+                'source': file_name,  # CRITICAL: For citations
             }
 
             # Add project_id if provided (for multi-tenancy)
             if project_id:
                 metadata_to_inject['project_id'] = project_id
-                logger.info(f"[{doc_id}] Tagging all chunks with project_id: {project_id}")
 
             # Add custom metadata if provided
             if custom_metadata:
@@ -733,27 +737,23 @@ class DocumentToVectorService:
                         normalized_text=normalized_text
                     )
 
-                    # CRITICAL: Inject project_id into ALL OpenSearch documents
+                    # CRITICAL: Inject metadata into ALL OpenSearch documents
                     # Note: hybrid_chunks contains ChunkMetadata objects, not dicts
-                    if project_id:
-                        for chunk_type, chunk_list in hybrid_chunks.items():
-                            for chunk in chunk_list:
-                                # Use setattr for ChunkMetadata objects
-                                if hasattr(chunk, 'project_id'):
-                                    chunk.project_id = project_id
-                                else:
-                                    # Add project_id as a new attribute
-                                    setattr(chunk, 'project_id', project_id)
+                    for chunk_type, chunk_list in hybrid_chunks.items():
+                        for chunk in chunk_list:
+                            # Inject project_id
+                            if project_id:
+                                setattr(chunk, 'project_id', project_id)
 
-                                if hasattr(chunk, 'schema_version'):
-                                    chunk.schema_version = INGESTION_SCHEMA_VERSION
-                                else:
-                                    setattr(chunk, 'schema_version', INGESTION_SCHEMA_VERSION)
+                            # Inject schema_version
+                            setattr(chunk, 'schema_version', INGESTION_SCHEMA_VERSION)
 
-                                # Ensure non-negative chunk_index
-                                if hasattr(chunk, 'chunk_index') and chunk.chunk_index < 0:
-                                    chunk.chunk_index = 0
-                        logger.info(f"[{doc_id}] Injected project_id into all OpenSearch documents")
+                            # CRITICAL: Inject document_title for citations
+                            setattr(chunk, 'document_title', document_title)
+
+                            # Ensure non-negative chunk_index
+                            if hasattr(chunk, 'chunk_index') and chunk.chunk_index < 0:
+                                chunk.chunk_index = 0
 
                     # Index hybrid chunks in OpenSearch
                     opensearch_stats = self.opensearch_store.index_hybrid_chunks(

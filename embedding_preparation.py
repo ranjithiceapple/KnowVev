@@ -88,18 +88,41 @@ class EmbeddingRecord:
         """
         Convert to Qdrant-compatible payload.
         Optimized for filtering and field-based queries.
+
+        CRITICAL FIELDS FOR CITATIONS:
+        - source: file_name for citation display
+        - title/document_title: document title for display
+        - document_name: human readable document name
+        - page: page number for citation
+        - section: section name for citation
         """
-        # Extract project_id from embedding_metadata if present (for multi-tenancy)
-        project_id = self.embedding_metadata.get('project_id', None)
+        # Extract from embedding_metadata (injected during ingestion)
+        project_id = self.embedding_metadata.get('project_id')
+        document_title = self.embedding_metadata.get('document_title', '')
+        schema_version = self.embedding_metadata.get('schema_version', '')
+
+        # Clean file_name to get document_name (remove UUID prefix if present)
+        document_name = self.file_name
+        if '_' in document_name and len(document_name.split('_')[0]) == 36:
+            # Remove UUID prefix like "07d64b8e-0edd-4cd9-b263-98e4ead12f14_"
+            document_name = '_'.join(document_name.split('_')[1:])
 
         payload = {
+            # === CRITICAL FOR CITATIONS ===
+            'source': self.file_name,                    # Original filename
+            'title': document_title or document_name,    # Document title
+            'document_title': document_title or document_name,
+            'document_name': document_name,              # Clean document name
+            'page': self.page_number_start,              # Page number
+            'section': self.section_title or "",         # Section for citation
+
             # IDs
             'chunk_id': self.chunk_id,
             'embedding_id': self.embedding_id,
             'embedding_hash': self.embedding_hash,
-
-            # Source
             'doc_id': self.doc_id,
+
+            # Source tracking
             'file_name': self.file_name,
             'page_start': self.page_number_start,
             'page_end': self.page_number_end,
@@ -138,10 +161,11 @@ class EmbeddingRecord:
 
             # Version
             'version': self.version,
+            'schema_version': schema_version,
             'created_at': self.created_at,
             'pipeline': self.processing_pipeline,
 
-            # Topic modeling fields (NEW)
+            # Topic modeling fields
             'topic_id': self.embedding_metadata.get('topic', {}).get('topic_id'),
             'topic_label': self.embedding_metadata.get('topic', {}).get('topic_label', ''),
             'topic_confidence': self.embedding_metadata.get('topic', {}).get('confidence', 0.0),

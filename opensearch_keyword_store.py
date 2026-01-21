@@ -66,6 +66,13 @@ class KeywordDocument:
     """
     Document structure for OpenSearch keyword indexing.
     Optimized for keyword search and faceted filtering.
+
+    CRITICAL FIELDS FOR CITATIONS:
+    - source: file_name for citation display
+    - title/document_title: document title for display
+    - document_name: human readable document name
+    - page: page number for citation
+    - section: section name for citation
     """
     # Identifiers
     doc_id: str
@@ -76,6 +83,14 @@ class KeywordDocument:
     text: str                           # Main searchable text
     text_normalized: str                # Lowercase normalized text
     keywords: List[str]                 # Extracted keywords
+
+    # === CRITICAL FOR CITATIONS ===
+    source: str = ""                    # Original filename
+    title: str = ""                     # Document title
+    document_title: str = ""            # Document title (alias)
+    document_name: str = ""             # Clean document name
+    page: int = 1                       # Page number for citation
+    section: str = ""                   # Section for citation
 
     # Heading/Section information
     section_title: Optional[str] = None
@@ -348,6 +363,26 @@ class OpenSearchKeywordStore:
                     "chunk_id": {"type": "keyword"},
                     "chunk_type": {"type": "keyword"},
 
+                    # === CRITICAL FOR CITATIONS ===
+                    "source": {"type": "keyword"},
+                    "title": {
+                        "type": "text",
+                        "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}
+                    },
+                    "document_title": {
+                        "type": "text",
+                        "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}
+                    },
+                    "document_name": {
+                        "type": "text",
+                        "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}
+                    },
+                    "page": {"type": "integer"},
+                    "section": {
+                        "type": "text",
+                        "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}
+                    },
+
                     # Main searchable text fields
                     "text": {
                         "type": "text",
@@ -488,6 +523,15 @@ class OpenSearchKeywordStore:
         else:
             keywords = self.keyword_extractor.extract_keywords(text)
 
+        # Clean file_name to get document_name (remove UUID prefix if present)
+        file_name = chunk.file_name or ""
+        document_name = file_name
+        if '_' in document_name and len(document_name.split('_')[0]) == 36:
+            document_name = '_'.join(document_name.split('_')[1:])
+
+        # Get document_title from chunk metadata if available
+        document_title = getattr(chunk, 'document_title', None) or document_name
+
         return KeywordDocument(
             doc_id=doc_id or chunk.doc_id,
             chunk_id=chunk.chunk_id,
@@ -495,13 +539,23 @@ class OpenSearchKeywordStore:
             text=text,
             text_normalized=text.lower(),
             keywords=keywords,
+            # CRITICAL FOR CITATIONS
+            source=file_name,
+            title=document_title,
+            document_title=document_title,
+            document_name=document_name,
+            page=chunk.page_number_start,
+            section=chunk.section_title or "",
+            # Heading/Section
             section_title=chunk.section_title,
             heading_path=chunk.heading_path or [],
             heading_level=chunk.heading_level,
             parent_section=chunk.parent_section,
+            # Source tracking
             page_number_start=chunk.page_number_start,
             page_number_end=chunk.page_number_end,
-            file_name=chunk.file_name,
+            file_name=file_name,
+            # Metadata
             chunk_index=chunk.chunk_index,
             total_chunks=chunk.total_chunks,
             char_count=chunk.chunk_char_len,

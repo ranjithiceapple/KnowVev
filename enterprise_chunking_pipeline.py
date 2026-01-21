@@ -110,6 +110,9 @@ class ChunkMetadata:
     project_id: Optional[str] = None
     schema_version: Optional[str] = None
 
+    # Document-level metadata (for citations)
+    document_title: Optional[str] = None  # Clean title for citations
+
     # Timestamps
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
