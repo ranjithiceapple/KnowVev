@@ -7,8 +7,32 @@ Document → Text → Normalized Text → Chunks → Embeddings → Qdrant DB
 Simply upload a document and it's automatically processed and stored in Qdrant.
 """
 
+import os
+import sys
 import logging
 from pathlib import Path
+
+# =============================================================================
+# SUPPRESS VERBOSE LIBRARY OUTPUT (tqdm, transformers, huggingface_hub)
+# This prevents "[98B blob data]" spam in systemd journal
+# =============================================================================
+
+# Disable tqdm progress bars globally
+os.environ["TQDM_DISABLE"] = "1"
+
+# Disable huggingface_hub progress bars
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+
+# Disable transformers progress bars and reduce verbosity
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+# Suppress specific loggers
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
+logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+logging.getLogger("tqdm").setLevel(logging.ERROR)
+logging.getLogger("filelock").setLevel(logging.ERROR)
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, field
 import uuid
@@ -710,14 +734,25 @@ class DocumentToVectorService:
                     )
 
                     # CRITICAL: Inject project_id into ALL OpenSearch documents
+                    # Note: hybrid_chunks contains ChunkMetadata objects, not dicts
                     if project_id:
                         for chunk_type, chunk_list in hybrid_chunks.items():
                             for chunk in chunk_list:
-                                chunk['project_id'] = project_id
-                                chunk['schema_version'] = INGESTION_SCHEMA_VERSION
+                                # Use setattr for ChunkMetadata objects
+                                if hasattr(chunk, 'project_id'):
+                                    chunk.project_id = project_id
+                                else:
+                                    # Add project_id as a new attribute
+                                    setattr(chunk, 'project_id', project_id)
+
+                                if hasattr(chunk, 'schema_version'):
+                                    chunk.schema_version = INGESTION_SCHEMA_VERSION
+                                else:
+                                    setattr(chunk, 'schema_version', INGESTION_SCHEMA_VERSION)
+
                                 # Ensure non-negative chunk_index
-                                if chunk.get('chunk_index', 0) < 0:
-                                    chunk['chunk_index'] = 0
+                                if hasattr(chunk, 'chunk_index') and chunk.chunk_index < 0:
+                                    chunk.chunk_index = 0
                         logger.info(f"[{doc_id}] Injected project_id into all OpenSearch documents")
 
                     # Index hybrid chunks in OpenSearch
@@ -1052,13 +1087,23 @@ class DocumentToVectorService:
                     )
 
                     # CRITICAL: Inject project_id into ALL OpenSearch documents
+                    # Note: hybrid_chunks contains ChunkMetadata objects, not dicts
                     for chunk_type, chunk_list in hybrid_chunks.items():
                         for chunk in chunk_list:
-                            chunk['project_id'] = request.project_id
-                            chunk['schema_version'] = INGESTION_SCHEMA_VERSION
+                            # Use setattr for ChunkMetadata objects
+                            if hasattr(chunk, 'project_id'):
+                                chunk.project_id = request.project_id
+                            else:
+                                setattr(chunk, 'project_id', request.project_id)
+
+                            if hasattr(chunk, 'schema_version'):
+                                chunk.schema_version = INGESTION_SCHEMA_VERSION
+                            else:
+                                setattr(chunk, 'schema_version', INGESTION_SCHEMA_VERSION)
+
                             # Ensure non-negative chunk_index
-                            if chunk.get('chunk_index', 0) < 0:
-                                chunk['chunk_index'] = 0
+                            if hasattr(chunk, 'chunk_index') and chunk.chunk_index < 0:
+                                chunk.chunk_index = 0
 
                     # Index hybrid chunks
                     opensearch_stats = self.opensearch_store.index_hybrid_chunks(

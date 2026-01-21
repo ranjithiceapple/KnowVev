@@ -99,6 +99,10 @@ class KeywordDocument:
     contains_code: bool = False
     contains_bullets: bool = False
 
+    # Project scoping (for multi-tenancy)
+    project_id: Optional[str] = None
+    schema_version: Optional[str] = None
+
     # Timestamps
     indexed_at: str = None
 
@@ -404,6 +408,10 @@ class OpenSearchKeywordStore:
                     "contains_code": {"type": "boolean"},
                     "contains_bullets": {"type": "boolean"},
 
+                    # Project scoping (for multi-tenancy)
+                    "project_id": {"type": "keyword"},
+                    "schema_version": {"type": "keyword"},
+
                     # Timestamps
                     "indexed_at": {"type": "date"},
 
@@ -501,7 +509,10 @@ class OpenSearchKeywordStore:
             contains_tables=chunk.contains_tables,
             contains_code=chunk.contains_code,
             contains_bullets=chunk.contains_bullets,
-            parent_chunk_id=chunk.parent_chunk_id
+            parent_chunk_id=chunk.parent_chunk_id,
+            # Project scoping
+            project_id=getattr(chunk, 'project_id', None),
+            schema_version=getattr(chunk, 'schema_version', None)
         )
 
     def index_document(

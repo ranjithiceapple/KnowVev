@@ -1,11 +1,33 @@
 import os
+import logging
 
 # ------------------------------------------------------------------
 # Configure environment for marker-pdf
+# Suppress all verbose output (tqdm, transformers, surya, etc.)
+# This prevents "[98B blob data]" spam in systemd journal
 # ------------------------------------------------------------------
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Silence TensorFlow logs
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 os.environ["TRANSFORMERS_ATTN_IMPLEMENTATION"] = "eager"  # Prevent 'sdpa' KeyError
+
+# Disable tqdm progress bars
+os.environ["TQDM_DISABLE"] = "1"
+
+# Disable huggingface_hub progress bars
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+
+# Disable transformers progress bars
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+# Suppress verbose loggers
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
+logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+logging.getLogger("tqdm").setLevel(logging.ERROR)
+logging.getLogger("filelock").setLevel(logging.ERROR)
+logging.getLogger("surya").setLevel(logging.WARNING)
+logging.getLogger("marker").setLevel(logging.WARNING)
 
 import pymupdf4llm
 import pymupdf as fitz

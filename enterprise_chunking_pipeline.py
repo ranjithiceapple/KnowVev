@@ -106,6 +106,10 @@ class ChunkMetadata:
     contains_bullets: bool = False
     urls_in_chunk: List[str] = field(default_factory=list)
 
+    # Project scoping (for multi-tenancy)
+    project_id: Optional[str] = None
+    schema_version: Optional[str] = None
+
     # Timestamps
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
 

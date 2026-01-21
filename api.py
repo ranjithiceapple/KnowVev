@@ -1,3 +1,27 @@
+# =============================================================================
+# SUPPRESS VERBOSE LIBRARY OUTPUT - MUST BE FIRST BEFORE ANY IMPORTS
+# This prevents "[98B blob data]" spam in systemd journal from tqdm/transformers
+# =============================================================================
+import os
+import logging
+
+os.environ["TQDM_DISABLE"] = "1"
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+
+# Suppress verbose loggers early
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
+logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+logging.getLogger("tqdm").setLevel(logging.ERROR)
+logging.getLogger("filelock").setLevel(logging.ERROR)
+logging.getLogger("surya").setLevel(logging.WARNING)
+logging.getLogger("marker").setLevel(logging.WARNING)
+
+# =============================================================================
+
 from fastapi import FastAPI, File, UploadFile, HTTPException, Query, Body, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
