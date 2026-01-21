@@ -17,6 +17,13 @@ from document_to_vector_service import (
 )
 from logger_config import get_logger
 from list_documents_and_embeddings import DocumentLister
+from async_ingestion_service import (
+    AsyncIngestionService,
+    init_async_ingestion_service,
+    shutdown_async_ingestion_service,
+    get_async_ingestion_service,
+    JobStatus
+)
 # COMMENTED OUT: Advanced search features (optional modules)
 # from query_intent_classifier import QueryIntentClassifier, QueryIntent
 # from query_analyzer import EnhancedQueryAnalyzer
@@ -79,6 +86,16 @@ document_lister = DocumentLister(
 )
 logger.info("DocumentLister initialized successfully")
 
+# Initialize Async Ingestion Service (for background processing)
+logger.info("Initializing AsyncIngestionService")
+async_service = init_async_ingestion_service(
+    document_service=service,
+    max_workers=2,  # Number of concurrent ingestion workers
+    max_queue_size=100,  # Max pending jobs
+    job_retention_hours=24  # Keep completed jobs for 24h
+)
+logger.info("AsyncIngestionService initialized with 2 workers")
+
 # COMMENTED OUT: Advanced search features (optional modules)
 # # Initialize Query Intent Classifier
 # logger.info("Initializing QueryIntentClassifier")
@@ -110,6 +127,13 @@ app.add_middleware(
 logger.info(f"CORS middleware configured - Origins: {cors_origins}")
 
 
+# Lifecycle events for graceful shutdown
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Gracefully shutdown async ingestion service."""
+    logger.info("Shutting down async ingestion service...")
+    shutdown_async_ingestion_service()
+    logger.info("Async ingestion service shutdown complete")
 
 
 # Request logging middleware
@@ -375,6 +399,155 @@ async def process_document(
             exc_info=True
         )
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------
+# 1️⃣A ASYNC DOCUMENT INGESTION (RECOMMENDED FOR PRODUCTION)
+# ---------------------------------------------------------
+@app.post("/ingest")
+async def ingest_document_async(
+    file: UploadFile = File(...),
+    doc_id: str = Form(..., description="Mandatory document ID from API service"),
+    project_id: str = Form(..., description="Mandatory project ID for data isolation")
+):
+    """
+    Submit a document for ASYNC ingestion (RECOMMENDED).
+
+    Returns immediately with a job_id. Poll /ingest/{job_id}/status for progress.
+
+    This endpoint:
+    1. Saves the file to a temp location
+    2. Submits to background worker queue
+    3. Returns job_id immediately (no blocking)
+    4. Worker processes in background with cache cleanup
+
+    Benefits over /process:
+    - No HTTP timeout issues with large documents
+    - Progress tracking via status endpoint
+    - Automatic temp file cleanup
+    - Automatic model cache management
+    - Handles multiple documents concurrently
+
+    Args:
+        file: Document file to process
+        doc_id: MANDATORY document ID (from your Postgres)
+        project_id: MANDATORY project ID for data isolation
+
+    Returns:
+        {job_id, status: "pending", ...}
+    """
+    logger.info(
+        f"Async ingest request - Filename: {file.filename}, "
+        f"Doc ID: {doc_id}, Project ID: {project_id}"
+    )
+
+    try:
+        # Save to temp location
+        temp_file_path = f"/tmp/{uuid.uuid4()}_{file.filename}"
+        with open(temp_file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        file_size = os.path.getsize(temp_file_path)
+        logger.info(f"File saved to {temp_file_path} ({file_size} bytes)")
+
+        # Submit to async queue
+        job = async_service.submit_job(
+            file_path=temp_file_path,
+            original_filename=file.filename,
+            doc_id=doc_id,
+            project_id=project_id
+        )
+
+        logger.info(f"Job submitted - job_id: {job.job_id}")
+
+        return {
+            "message": "Document submitted for processing",
+            "job_id": job.job_id,
+            "doc_id": doc_id,
+            "project_id": project_id,
+            "status": job.status.value,
+            "status_url": f"/ingest/{job.job_id}/status"
+        }
+
+    except RuntimeError as e:
+        # Queue full
+        logger.error(f"Queue full: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        logger.error(f"Async ingest error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ingest/{job_id}/status")
+async def get_ingestion_status(job_id: str):
+    """
+    Get the status of an async ingestion job.
+
+    Poll this endpoint to track progress until status is "completed" or "failed".
+
+    Returns:
+        {job_id, status, progress, current_stage, result (if completed), error (if failed)}
+    """
+    job_status = async_service.get_job_status(job_id)
+
+    if not job_status:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+
+    return job_status
+
+
+@app.delete("/ingest/{job_id}")
+async def cancel_ingestion_job(job_id: str):
+    """
+    Cancel a pending ingestion job.
+
+    Only works for jobs in "pending" status (not yet started).
+    """
+    success = async_service.cancel_job(job_id)
+
+    if success:
+        return {"message": "Job cancelled", "job_id": job_id}
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot cancel job {job_id} (may be already processing or completed)"
+        )
+
+
+@app.get("/ingest/queue/stats")
+async def get_queue_stats():
+    """
+    Get ingestion queue statistics.
+
+    Returns:
+        Queue size, worker count, jobs by status, etc.
+    """
+    return async_service.get_queue_stats()
+
+
+@app.get("/ingest/cache/stats")
+async def get_cache_stats():
+    """
+    Get cache and temp file statistics.
+
+    Returns:
+        Cache sizes, temp file counts, etc.
+    """
+    return async_service.cache_manager.get_cache_stats()
+
+
+@app.post("/ingest/cache/cleanup")
+async def trigger_cache_cleanup():
+    """
+    Manually trigger cache and temp file cleanup.
+
+    Use this if disk space is low.
+    """
+    stats = async_service.cache_manager.cleanup_all()
+    return {
+        "message": "Cleanup completed",
+        "stats": stats
+    }
 
 
 # ---------------------------------------------------------
