@@ -299,7 +299,6 @@ class DocumentToVectorService:
             f"Service initialized | qdrant={self.config.qdrant_url} "
             f"model={self.config.embedding_model_name} "
             f"opensearch={'enabled' if self.config.opensearch_enabled else 'disabled'} "
-            f"topics={'enabled' if self.config.enable_topic_modeling else 'disabled'} | "
             f"duration={init_duration:.2f}s"
         )
 
@@ -508,7 +507,6 @@ class DocumentToVectorService:
             # Prepare metadata to inject into all chunks
             metadata_to_inject = {
                 'doc_id': doc_id,
-                'schema_version': INGESTION_SCHEMA_VERSION,
                 'document_title': document_title,
                 'source': file_name,
             }
@@ -574,7 +572,6 @@ class DocumentToVectorService:
                         for chunk in chunk_list:
                             if project_id:
                                 setattr(chunk, 'project_id', project_id)
-                            setattr(chunk, 'schema_version', INGESTION_SCHEMA_VERSION)
                             setattr(chunk, 'document_title', document_title)
                             if hasattr(chunk, 'chunk_index') and chunk.chunk_index < 0:
                                 chunk.chunk_index = 0

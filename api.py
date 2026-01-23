@@ -76,11 +76,7 @@ service_config = ServiceConfig(
     generate_document_summary=config.generate_document_summary,
     summary_max_length=config.summary_max_length,
     summary_method=config.summary_method,
-    # Topic modeling settings
-    enable_topic_modeling=config.enable_topic_modeling,
-    topic_n_topics=config.topic_n_topics,
-    topic_model_dir=config.topic_model_dir,
-    topic_retrain_threshold=config.topic_retrain_threshold_docs,
+
 )
 logger.info(f"Service config created - Collection: {service_config.qdrant_collection}, Vector size: {service_config.vector_size}")
 
