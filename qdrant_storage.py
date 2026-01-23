@@ -44,6 +44,8 @@ except ImportError:
 def qdrant_id_from_chunk_id(chunk_id: str) -> str:
     """
     Generate a deterministic UUID for Qdrant from chunk_id.
+    Qdrant only accepts UUIDs or integers as point IDs, not arbitrary strings.
+    This ensures the same chunk_id always maps to the same UUID.
     """
     return str(uuid.uuid5(uuid.NAMESPACE_URL, chunk_id))
 
@@ -264,9 +266,9 @@ class QdrantStorage:
 
             points = [
                 PointStruct(
-                    id=qdrant_id_from_chunk_id(rec.chunk_id),
+                    id=qdrant_id_from_chunk_id(rec.chunk_id),  # Qdrant requires UUID/integer
                     vector=vec,
-                    payload=rec.to_qdrant_payload()
+                    payload=rec.to_qdrant_payload()  # chunk_id is stored in payload
                 )
                 for rec, vec in zip(batch_records, batch_vectors)
             ]
@@ -307,9 +309,9 @@ class QdrantStorage:
 
         point_structs = [
             PointStruct(
-                id=qdrant_id_from_chunk_id(p['id']),   # where p['id'] == chunk_id,
+                id=qdrant_id_from_chunk_id(p['id']),  # Qdrant requires UUID/integer
                 vector=p['vector'],
-                payload={**p['payload'], 'original_id': p['id']}
+                payload=p['payload']  # chunk_id is stored in payload
             )
             for p in points
         ]
@@ -475,6 +477,13 @@ class QdrantStorage:
         return Filter(must=conditions)
 
     def update_metadata(self, point_id: str, metadata: Dict):
+        """
+        Update metadata for a point.
+
+        Args:
+            point_id: The chunk_id (will be converted to UUID for Qdrant)
+            metadata: Metadata to update
+        """
         logger.info(f"Updating metadata for point '{point_id}' - Fields: {list(metadata.keys())}")
         try:
             qdrant_id = qdrant_id_from_chunk_id(point_id)
@@ -506,6 +515,15 @@ class QdrantStorage:
             raise
 
     def get_by_id(self, point_id: str):
+        """
+        Retrieve a point by chunk_id.
+
+        Args:
+            point_id: The chunk_id (will be converted to UUID for Qdrant)
+
+        Returns:
+            Point data with UUID id, or None if not found
+        """
         logger.debug(f"Retrieving point by ID: {point_id}")
         try:
             qdrant_id = qdrant_id_from_chunk_id(point_id)

@@ -638,7 +638,8 @@ class EnterpriseChunkingPipeline:
         self,
         extraction_result,
         doc_id: Optional[str] = None,
-        normalized_text: Optional[str] = None
+        normalized_text: Optional[str] = None,
+        project_id: Optional[str] = None
     ) -> List[ChunkMetadata]:
         """
         Main entry point: Chunk an entire document.
@@ -647,6 +648,7 @@ class EnterpriseChunkingPipeline:
             extraction_result: ExtractionResult from document_processor
             doc_id: Optional document ID (will generate if not provided)
             normalized_text: Optional pre-normalized text (if not provided, uses extraction_result.text)
+            project_id: Optional project ID for multi-tenancy
 
         Returns:
             List of ChunkMetadata objects
@@ -1076,10 +1078,17 @@ class EnterpriseChunkingPipeline:
             contains_bullets = bool(re.search(r'^[\s]*[•·∙●○◦▪▫■□\*\-\+]\s+', text, re.MULTILINE))
 
             # Create metadata with VALIDATED HIERARCHY
+            # Format chunk_id: {project_id}_{doc_id}_chunk_{index}
+            if project_id:
+                chunk_id = f"{project_id}_{doc_id}_chunk_{i:04d}"
+            else:
+                chunk_id = f"{doc_id}_chunk_{i:04d}"
+
             metadata = ChunkMetadata(
                 doc_id=doc_id,
+                project_id=project_id,  # Pass project_id for multi-tenancy
                 file_name=extraction_result.metadata.file_name,
-                chunk_id=f"{doc_id}_chunk_{i:04d}",
+                chunk_id=chunk_id,
                 page_number_start=chunk['page_start'],
                 page_number_end=chunk['page_end'],
                 section_title=chunk.get('section_title'),  # Clean section name
@@ -1117,7 +1126,8 @@ class EnterpriseChunkingPipeline:
         self,
         content_chunks: List[ChunkMetadata],
         extraction_result,
-        doc_id: str
+        doc_id: str,
+        project_id: Optional[str] = None
     ) -> List[ChunkMetadata]:
         """
         Generate heading-only chunks for keyword/faceted search in OpenSearch.
@@ -1159,10 +1169,17 @@ class EnterpriseChunkingPipeline:
                 heading_text = section_title
 
             # Create heading chunk
+            # Format chunk_id with project_id if available
+            if project_id:
+                heading_chunk_id = f"{project_id}_{doc_id}_heading_{len(heading_chunks):04d}"
+            else:
+                heading_chunk_id = f"{doc_id}_heading_{len(heading_chunks):04d}"
+
             heading_chunk = ChunkMetadata(
                 doc_id=doc_id,
+                project_id=project_id,
                 file_name=content_chunk.file_name,
-                chunk_id=f"{doc_id}_heading_{len(heading_chunks):04d}",
+                chunk_id=heading_chunk_id,
                 page_number_start=content_chunk.page_number_start,
                 page_number_end=content_chunk.page_number_start,  # Headings are single-page reference
                 section_title=section_title,
@@ -1193,7 +1210,8 @@ class EnterpriseChunkingPipeline:
         self,
         content_chunks: List[ChunkMetadata],
         extraction_result,
-        doc_id: str
+        doc_id: str,
+        project_id: Optional[str] = None
     ) -> List[ChunkMetadata]:
         """
         Generate clause/sentence-level chunks for precise retrieval.
@@ -1288,10 +1306,17 @@ class EnterpriseChunkingPipeline:
                         context_sentences.extend(sentences[i+1:next_idx])
 
                 # Create clause chunk
+                # Format chunk_id with project_id if available
+                if project_id:
+                    clause_chunk_id = f"{project_id}_{doc_id}_clause_{len(clause_chunks):04d}"
+                else:
+                    clause_chunk_id = f"{doc_id}_clause_{len(clause_chunks):04d}"
+
                 clause_chunk = ChunkMetadata(
                     doc_id=doc_id,
+                    project_id=project_id,
                     file_name=content_chunk.file_name,
-                    chunk_id=f"{doc_id}_clause_{len(clause_chunks):04d}",
+                    chunk_id=clause_chunk_id,
                     page_number_start=content_chunk.page_number_start,
                     page_number_end=content_chunk.page_number_end,
                     section_title=content_chunk.section_title,
@@ -1322,7 +1347,8 @@ class EnterpriseChunkingPipeline:
     def _generate_metadata_chunks(
         self,
         extraction_result,
-        doc_id: str
+        doc_id: str,
+        project_id: Optional[str] = None
     ) -> List[ChunkMetadata]:
         """
         Generate metadata-only chunks for filtering and faceted search.
@@ -1392,10 +1418,17 @@ class EnterpriseChunkingPipeline:
         metadata_text = "\n".join(metadata_parts) if metadata_parts else f"Document: {doc_metadata.file_name}"
 
         # Create metadata chunk
+        # Format chunk_id with project_id if available
+        if project_id:
+            metadata_chunk_id = f"{project_id}_{doc_id}_metadata_0000"
+        else:
+            metadata_chunk_id = f"{doc_id}_metadata_0000"
+
         metadata_chunk = ChunkMetadata(
             doc_id=doc_id,
+            project_id=project_id,
             file_name=doc_metadata.file_name,
-            chunk_id=f"{doc_id}_metadata_0000",
+            chunk_id=metadata_chunk_id,
             page_number_start=1,
             page_number_end=1,
             section_title="Document Metadata",
@@ -1419,7 +1452,8 @@ class EnterpriseChunkingPipeline:
         self,
         content_chunks: List[ChunkMetadata],
         extraction_result,
-        doc_id: str
+        doc_id: str,
+        project_id: Optional[str] = None
     ) -> List[ChunkMetadata]:
         """
         Generate summary chunks for high-level document understanding.
@@ -1464,10 +1498,17 @@ class EnterpriseChunkingPipeline:
             doc_summary_text = " ".join(summary_sentences)
 
             if doc_summary_text:
+                # Format chunk_id with project_id if available
+                if project_id:
+                    doc_summary_chunk_id = f"{project_id}_{doc_id}_summary_doc_0000"
+                else:
+                    doc_summary_chunk_id = f"{doc_id}_summary_doc_0000"
+
                 doc_summary_chunk = ChunkMetadata(
                     doc_id=doc_id,
+                    project_id=project_id,
                     file_name=extraction_result.metadata.file_name,
-                    chunk_id=f"{doc_id}_summary_doc_0000",
+                    chunk_id=doc_summary_chunk_id,
                     page_number_start=1,
                     page_number_end=content_chunks[-1].page_number_end if content_chunks else 1,
                     section_title="Document Summary",
@@ -1510,10 +1551,17 @@ class EnterpriseChunkingPipeline:
                     first_chunk = section_chunks[0]
                     last_chunk = section_chunks[-1]
 
+                    # Format chunk_id with project_id if available
+                    if project_id:
+                        section_summary_chunk_id = f"{project_id}_{doc_id}_summary_sec_{len(summary_chunks):04d}"
+                    else:
+                        section_summary_chunk_id = f"{doc_id}_summary_sec_{len(summary_chunks):04d}"
+
                     section_summary_chunk = ChunkMetadata(
                         doc_id=doc_id,
+                        project_id=project_id,
                         file_name=extraction_result.metadata.file_name,
-                        chunk_id=f"{doc_id}_summary_sec_{len(summary_chunks):04d}",
+                        chunk_id=section_summary_chunk_id,
                         page_number_start=first_chunk.page_number_start,
                         page_number_end=last_chunk.page_number_end,
                         section_title=f"Summary: {section_title}",
@@ -1543,7 +1591,8 @@ class EnterpriseChunkingPipeline:
         self,
         extraction_result,
         doc_id: Optional[str] = None,
-        normalized_text: Optional[str] = None
+        normalized_text: Optional[str] = None,
+        project_id: Optional[str] = None
     ) -> Dict[str, List[ChunkMetadata]]:
         """
         Generate all chunk types for hybrid (OpenSearch + vector) search.
@@ -1568,7 +1617,7 @@ class EnterpriseChunkingPipeline:
             doc_id = str(uuid.uuid4())
 
         # Generate standard content chunks first
-        content_chunks = self.chunk_document(extraction_result, doc_id, normalized_text)
+        content_chunks = self.chunk_document(extraction_result, doc_id, normalized_text, project_id=project_id)
 
         # Initialize result dictionary
         hybrid_chunks = {
@@ -1582,25 +1631,25 @@ class EnterpriseChunkingPipeline:
         # Generate heading chunks if enabled
         if self.config.generate_heading_chunks:
             hybrid_chunks['heading'] = self._generate_heading_chunks(
-                content_chunks, extraction_result, doc_id
+                content_chunks, extraction_result, doc_id, project_id=project_id
             )
 
         # Generate clause chunks if enabled
         if self.config.generate_clause_chunks:
             hybrid_chunks['clause'] = self._generate_clause_chunks(
-                content_chunks, extraction_result, doc_id
+                content_chunks, extraction_result, doc_id, project_id=project_id
             )
 
         # Generate metadata chunks if enabled
         if self.config.generate_metadata_chunks:
             hybrid_chunks['metadata'] = self._generate_metadata_chunks(
-                extraction_result, doc_id
+                extraction_result, doc_id, project_id=project_id
             )
 
         # Generate summary chunks if enabled
         if self.config.generate_summary_chunks:
             hybrid_chunks['summary'] = self._generate_summary_chunks(
-                content_chunks, extraction_result, doc_id
+                content_chunks, extraction_result, doc_id, project_id=project_id
             )
 
         # Single consolidated log for hybrid chunking
@@ -1666,7 +1715,8 @@ def chunk_document_simple(
 def chunk_with_normalization(
     extraction_result,
     normalized_text: str,
-    config: Optional[ChunkingConfig] = None
+    config: Optional[ChunkingConfig] = None,
+    project_id: Optional[str] = None
 ) -> List[ChunkMetadata]:
     """
     Chunk using pre-normalized text.
@@ -1675,12 +1725,13 @@ def chunk_with_normalization(
         extraction_result: ExtractionResult from document_processor
         normalized_text: Pre-normalized text (from MetadataAwareNormalizer)
         config: Optional ChunkingConfig
+        project_id: Optional project ID for multi-tenancy
 
     Returns:
         List of ChunkMetadata
     """
     pipeline = EnterpriseChunkingPipeline(config)
-    return pipeline.chunk_document(extraction_result, normalized_text=normalized_text)
+    return pipeline.chunk_document(extraction_result, normalized_text=normalized_text, project_id=project_id)
 
 
 def chunk_for_hybrid_search(

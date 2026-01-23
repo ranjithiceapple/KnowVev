@@ -488,7 +488,8 @@ class DocumentToVectorService:
             chunks = chunk_with_normalization(
                 extraction_result,
                 normalized_text,
-                chunk_config
+                chunk_config,
+                project_id=project_id  # Pass project_id for multi-tenancy
             )
 
             result.chunks_created = len(chunks)
@@ -671,7 +672,8 @@ class DocumentToVectorService:
                     hybrid_chunks = hybrid_pipeline.generate_hybrid_chunks(
                         extraction_result,
                         doc_id=doc_id,
-                        normalized_text=normalized_text
+                        normalized_text=normalized_text,
+                        project_id=project_id
                     )
 
                     # Inject metadata into ALL OpenSearch documents
@@ -841,7 +843,8 @@ class DocumentToVectorService:
             chunks = chunk_with_normalization(
                 extraction_result,
                 normalized_text,
-                chunk_config
+                chunk_config,
+                project_id=project_id  # Pass project_id for multi-tenancy
             )
 
             response.chunks_created = len(chunks)
@@ -976,7 +979,8 @@ class DocumentToVectorService:
                     hybrid_chunks = hybrid_pipeline.generate_hybrid_chunks(
                         extraction_result,
                         doc_id=request.doc_id,
-                        normalized_text=normalized_text
+                        normalized_text=normalized_text,
+                        project_id=request.project_id
                     )
 
                     # CRITICAL: Inject project_id into ALL OpenSearch documents

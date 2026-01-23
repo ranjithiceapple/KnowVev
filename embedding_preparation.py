@@ -492,7 +492,19 @@ class EmbeddingPreparationPipeline:
             # Step 4: Build metadata
             embedding_metadata = self.metadata_builder.build_embedding_metadata(chunk)
 
-            canonical_chunk_id = f"{chunk.doc_id}_chunk_{chunk.chunk_index:04d}"
+            # Handle special chunks with negative indices (e.g., summary chunks)
+            # Format: {project_id}_{doc_id}_chunk_{index} or {project_id}_{doc_id}_SUMMARY
+            if chunk.chunk_index < 0:
+                # Use special identifier for summary chunks
+                if chunk.project_id:
+                    canonical_chunk_id = f"{chunk.project_id}_{chunk.doc_id}_SUMMARY"
+                else:
+                    canonical_chunk_id = f"{chunk.doc_id}_SUMMARY"
+            else:
+                if chunk.project_id:
+                    canonical_chunk_id = f"{chunk.project_id}_{chunk.doc_id}_chunk_{chunk.chunk_index:04d}"
+                else:
+                    canonical_chunk_id = f"{chunk.doc_id}_chunk_{chunk.chunk_index:04d}"
 
             # Step 5: Create embedding record
             record = EmbeddingRecord(
