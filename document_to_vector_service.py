@@ -420,6 +420,11 @@ class DocumentToVectorService:
                 project_id=project_id  # Pass project_id for multi-tenancy
             )
 
+            for chunk in chunks:
+                if not chunk.project_id:
+                    chunk.project_id = project_id
+
+
             result.chunks_created = len(chunks)
             result.chunking_time = time.time() - stage_start
 
