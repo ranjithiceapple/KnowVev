@@ -257,10 +257,8 @@ class DocumentToVectorService:
 
     def __init__(self, config: Optional[ServiceConfig] = None):
         init_start = time.time()
-        logger.info("Initializing DocumentToVectorService")
 
         self.config = config or ServiceConfig()
-        logger.debug(f"Service config: {self.config}")
 
         # Load environment variables (Docker override)
         import os
@@ -268,33 +266,18 @@ class DocumentToVectorService:
         env_model_name = os.getenv("EMBEDDING_MODEL")
 
         if env_qdrant_url:
-            logger.info(f"Overriding Qdrant URL from environment: {env_qdrant_url}")
             self.config.qdrant_url = env_qdrant_url
-
         if env_model_name:
-            logger.info(f"Overriding embedding model from environment: {env_model_name}")
             self.config.embedding_model_name = env_model_name
-
-        logger.info(f"Using Qdrant URL: {self.config.qdrant_url}")
-        logger.info(f"Using Embedding Model: {self.config.embedding_model_name}")
-        logger.info(
-            f"Pipeline settings - Chunking: max={self.config.max_chunk_size}, target={self.config.target_chunk_size}, "
-            f"overlap={self.config.overlap_size}, Deduplication: {self.config.deduplicate_chunks}"
-        )
 
         # Initialize embedding model
         if EMBEDDING_MODEL_AVAILABLE:
-            logger.info(f"Loading embedding model: {self.config.embedding_model_name}")
-            model_start = time.time()
             self.embedding_model = SentenceTransformer(self.config.embedding_model_name)
-            model_duration = time.time() - model_start
-            logger.info(f"Embedding model loaded in {model_duration:.2f}s")
         else:
-            logger.error("sentence-transformers not available - cannot initialize service")
+            logger.error("sentence-transformers not available")
             raise ImportError("sentence-transformers required. Install with: pip install sentence-transformers")
 
         # Initialize Qdrant storage
-        logger.info("Initializing Qdrant storage")
         self.qdrant_config = QdrantConfig(
             url=self.config.qdrant_url,
             api_key=self.config.qdrant_api_key,
@@ -304,16 +287,11 @@ class DocumentToVectorService:
         )
 
         self.storage = QdrantStorage(self.qdrant_config)
-        logger.info("Qdrant storage initialized")
-
-        # Setup collection
-        logger.info("Ensuring Qdrant collection exists")
         self._ensure_collection_exists()
 
         # Initialize topic modeling
         if self.config.enable_topic_modeling:
             try:
-                logger.info("Initializing topic modeling...")
                 from topic_modeling_service import TopicModelManager, TopicConfig
 
                 topic_config = TopicConfig(
@@ -324,77 +302,67 @@ class DocumentToVectorService:
                 )
 
                 self.topic_manager = TopicModelManager(topic_config, self.storage)
-                logger.info("Topic modeling initialized successfully")
             except Exception as e:
-                logger.error(f"Failed to initialize topic modeling: {e}")
-                logger.warning("Continuing without topic modeling")
+                logger.warning(f"Topic modeling unavailable: {e}")
                 self.config.enable_topic_modeling = False
-        else:
-            logger.info("Topic modeling disabled")
 
         # Initialize OpenSearch for hybrid keyword search
         self.opensearch_store = None
-        if self.config.opensearch_enabled:
-            if OPENSEARCH_AVAILABLE:
-                try:
-                    logger.info("Initializing OpenSearch for hybrid keyword search...")
+        if self.config.opensearch_enabled and OPENSEARCH_AVAILABLE:
+            try:
+                # Load OpenSearch settings from environment
+                import os
+                env_opensearch_host = os.getenv("OPENSEARCH_HOST")
+                env_opensearch_port = os.getenv("OPENSEARCH_PORT")
+                env_opensearch_user = os.getenv("OPENSEARCH_USERNAME")
+                env_opensearch_pass = os.getenv("OPENSEARCH_PASSWORD")
 
-                    # Load OpenSearch settings from environment
-                    import os
-                    env_opensearch_host = os.getenv("OPENSEARCH_HOST")
-                    env_opensearch_port = os.getenv("OPENSEARCH_PORT")
-                    env_opensearch_user = os.getenv("OPENSEARCH_USERNAME")
-                    env_opensearch_pass = os.getenv("OPENSEARCH_PASSWORD")
+                if env_opensearch_host:
+                    self.config.opensearch_host = env_opensearch_host
+                if env_opensearch_port:
+                    self.config.opensearch_port = int(env_opensearch_port)
+                if env_opensearch_user:
+                    self.config.opensearch_username = env_opensearch_user
+                if env_opensearch_pass:
+                    self.config.opensearch_password = env_opensearch_pass
 
-                    if env_opensearch_host:
-                        self.config.opensearch_host = env_opensearch_host
-                    if env_opensearch_port:
-                        self.config.opensearch_port = int(env_opensearch_port)
-                    if env_opensearch_user:
-                        self.config.opensearch_username = env_opensearch_user
-                    if env_opensearch_pass:
-                        self.config.opensearch_password = env_opensearch_pass
+                self.opensearch_store = OpenSearchKeywordStore(
+                    host=self.config.opensearch_host,
+                    port=self.config.opensearch_port,
+                    username=self.config.opensearch_username,
+                    password=self.config.opensearch_password,
+                    use_ssl=self.config.opensearch_use_ssl,
+                    verify_certs=self.config.opensearch_verify_certs
+                )
 
-                    self.opensearch_store = OpenSearchKeywordStore(
-                        host=self.config.opensearch_host,
-                        port=self.config.opensearch_port,
-                        username=self.config.opensearch_username,
-                        password=self.config.opensearch_password,
-                        use_ssl=self.config.opensearch_use_ssl,
-                        verify_certs=self.config.opensearch_verify_certs
-                    )
-
-                    # Ensure index exists
-                    self.opensearch_store.create_index(
-                        self.config.opensearch_index,
-                        delete_if_exists=False
-                    )
-
-                    logger.info(
-                        f"OpenSearch initialized: {self.config.opensearch_host}:{self.config.opensearch_port}, "
-                        f"index: {self.config.opensearch_index}"
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to initialize OpenSearch: {e}")
-                    logger.warning("Continuing without OpenSearch hybrid search")
-                    self.opensearch_store = None
-                    self.config.opensearch_enabled = False
-            else:
-                logger.warning("opensearch-py not installed. Hybrid keyword search disabled.")
-                logger.warning("Install with: pip install opensearch-py")
+                # Ensure index exists
+                self.opensearch_store.create_index(
+                    self.config.opensearch_index,
+                    delete_if_exists=False
+                )
+            except Exception as e:
+                logger.warning(f"OpenSearch unavailable: {e}")
+                self.opensearch_store = None
                 self.config.opensearch_enabled = False
-        else:
-            logger.info("OpenSearch hybrid search disabled")
+        elif self.config.opensearch_enabled and not OPENSEARCH_AVAILABLE:
+            self.config.opensearch_enabled = False
 
         init_duration = time.time() - init_start
-        logger.info(f"DocumentToVectorService initialized successfully in {init_duration:.2f}s")
+
+        # Single consolidated initialization log
+        logger.info(
+            f"Service initialized | qdrant={self.config.qdrant_url} "
+            f"model={self.config.embedding_model_name} "
+            f"opensearch={'enabled' if self.config.opensearch_enabled else 'disabled'} "
+            f"topics={'enabled' if self.config.enable_topic_modeling else 'disabled'} | "
+            f"duration={init_duration:.2f}s"
+        )
 
 
     def _ensure_collection_exists(self):
         """Ensure Qdrant collection exists with proper indexes."""
         try:
             self.storage.collection_manager.create_collection(recreate=False)
-            logger.info("✅ Qdrant collection ready")
         except Exception as e:
             logger.error(f"Failed to setup Qdrant collection: {e}")
             raise
@@ -445,10 +413,6 @@ class DocumentToVectorService:
 
         file_name = Path(file_path).name
 
-        # Log with project_id context if provided
-        project_context = f"[Project: {project_id}] " if project_id else ""
-        logger.info(f"{project_context}[{doc_id}] Starting document processing pipeline for: {file_name}")
-
         result = ProcessingResult(
             success=False,
             doc_id=doc_id,
@@ -459,7 +423,6 @@ class DocumentToVectorService:
             # ================================================================
             # STAGE 1: EXTRACT DOCUMENT
             # ================================================================
-            logger.info(f"[{doc_id}] Stage 1/5: Extracting document...")
             stage_start = time.time()
 
             extraction_result = extract_text_from_document(
@@ -470,12 +433,9 @@ class DocumentToVectorService:
             result.pages_extracted = extraction_result.metadata.total_pages
             result.extraction_time = time.time() - stage_start
 
-            logger.info(f"[{doc_id}] ✅ Extracted {result.pages_extracted} pages in {result.extraction_time:.2f}s")
-
             # ================================================================
             # STAGE 2: NORMALIZE TEXT
             # ================================================================
-            logger.info(f"[{doc_id}] Stage 2/5: Normalizing text...")
             stage_start = time.time()
 
             norm_config = NormalizationConfig(
@@ -509,12 +469,9 @@ class DocumentToVectorService:
 
             result.normalization_time = time.time() - stage_start
 
-            logger.info(f"[{doc_id}] ✅ Normalized in {result.normalization_time:.2f}s ({norm_stats['char_reduction_percent']:.1f}% reduction)")
-
             # ================================================================
             # STAGE 3: CHUNK DOCUMENT
             # ================================================================
-            logger.info(f"[{doc_id}] Stage 3/5: Chunking document...")
             stage_start = time.time()
 
             chunk_config = ChunkingConfig(
@@ -536,8 +493,6 @@ class DocumentToVectorService:
 
             result.chunks_created = len(chunks)
             result.chunking_time = time.time() - stage_start
-
-            logger.info(f"[{doc_id}] ✅ Created {result.chunks_created} chunks in {result.chunking_time:.2f}s")
 
             # ================================================================
             # STAGE 3.5: GENERATE DOCUMENT SUMMARY (Virtual Chunk)
@@ -585,7 +540,6 @@ class DocumentToVectorService:
             # ================================================================
             # STAGE 4: PREPARE FOR EMBEDDING
             # ================================================================
-            logger.info(f"[{doc_id}] Stage 4/5: Preparing embeddings...")
             stage_start = time.time()
 
             embedding_records, dedup_stats = prepare_for_embedding(
@@ -611,21 +565,17 @@ class DocumentToVectorService:
 
             result.embedding_time = time.time() - stage_start
 
-            logger.info(f"[{doc_id}] ✅ Generated {len(embeddings)} embeddings in {result.embedding_time:.2f}s")
-            logger.info(f"[{doc_id}]    Deduplication: {dedup_stats.deduplication_rate:.1f}%")
-
             # ================================================================
             # STAGE 4.5: TOPIC MODELING (OPTIONAL)
             # ================================================================
             if self.config.enable_topic_modeling:
-                logger.info(f"[{doc_id}] Stage 4.5/6: Assigning topics...")
                 stage_start = time.time()
 
                 try:
                     # Get topic assignments (hybrid: doc-level + chunk-level)
                     doc_topic, chunk_topics = self.topic_manager.assign_topics_hybrid(
                         chunks=chunks,
-                        embeddings_text=texts  # Same texts used for embeddings
+                        embeddings_text=texts
                     )
 
                     # Inject topic metadata into embedding records
@@ -648,31 +598,25 @@ class DocumentToVectorService:
                     result.topic_modeling_time = time.time() - stage_start
                     result.document_topic = doc_topic.topic_label
 
-                    logger.info(f"[{doc_id}] ✅ Topics assigned in {result.topic_modeling_time:.2f}s")
-                    logger.info(f"[{doc_id}]    Document topic: {doc_topic.topic_label} (confidence: {doc_topic.confidence:.2f})")
-
                     # Check if retraining needed
                     if self.topic_manager.should_retrain():
-                        logger.info(f"[{doc_id}] Triggering background retraining...")
                         self.topic_manager.trigger_retrain_async()
 
                 except Exception as e:
-                    logger.error(f"[{doc_id}] Topic modeling failed: {e}", exc_info=True)
+                    logger.error(f"Topic modeling failed: {e}")
                     result.topic_modeling_time = time.time() - stage_start
-                    logger.warning(f"[{doc_id}] Continuing without topics")
 
             # ================================================================
             # STAGE 5: STORE IN QDRANT
             # ================================================================
-            logger.info(f"[{doc_id}] Stage 5/5: Storing in Qdrant...")
             stage_start = time.time()
 
             # Prepare metadata to inject into all chunks
             metadata_to_inject = {
-                'doc_id': doc_id,  # MANDATORY: Ensure consistent doc_id
-                'schema_version': INGESTION_SCHEMA_VERSION,  # Schema versioning
-                'document_title': document_title,  # CRITICAL: For citations
-                'source': file_name,  # CRITICAL: For citations
+                'doc_id': doc_id,
+                'schema_version': INGESTION_SCHEMA_VERSION,
+                'document_title': document_title,
+                'source': file_name,
             }
 
             # Add project_id if provided (for multi-tenancy)
@@ -683,17 +627,14 @@ class DocumentToVectorService:
             if custom_metadata:
                 metadata_to_inject.update(custom_metadata)
 
-            # CRITICAL: Inject metadata into ALL embedding records
+            # Inject metadata into ALL embedding records
             for record in embedding_records:
                 record.embedding_metadata.update(metadata_to_inject)
-                # Ensure non-negative chunk_index
                 if record.embedding_metadata.get('chunk_index', 0) < 0:
                     record.embedding_metadata['chunk_index'] = 0
-            logger.debug(f"[{doc_id}] Injected mandatory metadata into {len(embedding_records)} records")
 
-            # Collect all embedding_ids for Base Model tracking
+            # Collect all embedding_ids for tracking
             vector_ids = [record.embedding_id for record in embedding_records]
-            logger.info(f"[{doc_id}] Collected {len(vector_ids)} vector IDs for tracking")
 
             upload_stats = self.storage.store_embeddings(
                 embedding_records,
@@ -703,17 +644,13 @@ class DocumentToVectorService:
 
             result.vectors_stored = upload_stats['uploaded']
             result.vector_ids = vector_ids
-            result.embedding_ids = vector_ids  # Alias
+            result.embedding_ids = vector_ids
             result.storage_time = time.time() - stage_start
-
-            logger.info(f"[{doc_id}] ✅ Stored {result.vectors_stored} vectors in {result.storage_time:.2f}s")
-            logger.debug(f"[{doc_id}] Vector IDs: {vector_ids[:5]}..." if len(vector_ids) > 5 else f"[{doc_id}] Vector IDs: {vector_ids}")
 
             # ================================================================
             # STAGE 6: INDEX IN OPENSEARCH (Hybrid Keyword Search)
             # ================================================================
             if self.opensearch_store and self.config.opensearch_enabled:
-                logger.info(f"[{doc_id}] Stage 6/6: Indexing in OpenSearch for hybrid search...")
                 stage_start = time.time()
 
                 try:
@@ -737,21 +674,13 @@ class DocumentToVectorService:
                         normalized_text=normalized_text
                     )
 
-                    # CRITICAL: Inject metadata into ALL OpenSearch documents
-                    # Note: hybrid_chunks contains ChunkMetadata objects, not dicts
+                    # Inject metadata into ALL OpenSearch documents
                     for chunk_type, chunk_list in hybrid_chunks.items():
                         for chunk in chunk_list:
-                            # Inject project_id
                             if project_id:
                                 setattr(chunk, 'project_id', project_id)
-
-                            # Inject schema_version
                             setattr(chunk, 'schema_version', INGESTION_SCHEMA_VERSION)
-
-                            # CRITICAL: Inject document_title for citations
                             setattr(chunk, 'document_title', document_title)
-
-                            # Ensure non-negative chunk_index
                             if hasattr(chunk, 'chunk_index') and chunk.chunk_index < 0:
                                 chunk.chunk_index = 0
 
@@ -772,32 +701,22 @@ class DocumentToVectorService:
                     result.opensearch_total_chunks = opensearch_stats.get('success', 0)
                     result.opensearch_time = time.time() - stage_start
 
-                    logger.info(f"[{doc_id}] ✅ Indexed {result.opensearch_total_chunks} chunks in OpenSearch in {result.opensearch_time:.2f}s")
-                    logger.info(
-                        f"[{doc_id}]    Breakdown: content={result.opensearch_content_chunks}, "
-                        f"heading={result.opensearch_heading_chunks}, clause={result.opensearch_clause_chunks}, "
-                        f"metadata={result.opensearch_metadata_chunks}, summary={result.opensearch_summary_chunks}"
-                    )
-
                 except Exception as e:
-                    logger.error(f"[{doc_id}] OpenSearch indexing failed: {e}", exc_info=True)
+                    logger.error(f"OpenSearch indexing failed: {e}")
                     result.opensearch_time = time.time() - stage_start
-                    logger.warning(f"[{doc_id}] Continuing without OpenSearch indexing")
-            else:
-                logger.debug(f"[{doc_id}] OpenSearch indexing skipped (disabled or not available)")
 
             # ================================================================
-            # SUCCESS
+            # SUCCESS - Single consolidated summary log
             # ================================================================
             result.success = True
             result.total_time = time.time() - start_time
 
-            logger.info(f"[{doc_id}] ✅ COMPLETE: {file_name} processed in {result.total_time:.2f}s")
-            logger.info(f"[{doc_id}]    Pages: {result.pages_extracted}")
-            logger.info(f"[{doc_id}]    Chunks: {result.chunks_created} → {result.unique_chunks} unique")
-            logger.info(f"[{doc_id}]    Vectors: {result.vectors_stored} stored in Qdrant")
-            if result.opensearch_indexed:
-                logger.info(f"[{doc_id}]    OpenSearch: {result.opensearch_total_chunks} keyword chunks indexed")
+            # Single consolidated completion log
+            os_info = f" opensearch={result.opensearch_total_chunks}" if result.opensearch_indexed else ""
+            logger.info(
+                f"✅ {file_name} | pages={result.pages_extracted} chunks={result.unique_chunks} "
+                f"vectors={result.vectors_stored}{os_info} | duration={result.total_time:.2f}s"
+            )
 
         except Exception as e:
             # Handle errors
@@ -815,7 +734,7 @@ class DocumentToVectorService:
             else:
                 result.error_stage = "storage"
 
-            logger.error(f"[{doc_id}] ❌ FAILED at {result.error_stage}: {e}")
+            logger.error(f"❌ {file_name} | stage={result.error_stage} | error={e}")
 
         return result
 
@@ -847,12 +766,6 @@ class DocumentToVectorService:
         """
         start_time = time.time()
 
-        # Log request details
-        logger.info(
-            f"[{request.request_id[:8]}] Starting v2 ingestion pipeline "
-            f"- doc_id: {request.doc_id}, project_id: {request.project_id}"
-        )
-
         # Initialize response
         response = IngestionResponse(
             request_id=request.request_id,
@@ -870,7 +783,6 @@ class DocumentToVectorService:
             # ================================================================
             # STAGE 1: EXTRACT DOCUMENT
             # ================================================================
-            logger.info(f"[{request.doc_id}] Stage 1/6: Extracting document...")
             stage_start = time.time()
 
             extraction_result = extract_text_from_document(
@@ -881,12 +793,9 @@ class DocumentToVectorService:
             response.pages_extracted = extraction_result.metadata.total_pages
             response.extraction_time = time.time() - stage_start
 
-            logger.info(f"[{request.doc_id}] ✅ Extracted {response.pages_extracted} pages in {response.extraction_time:.2f}s")
-
             # ================================================================
             # STAGE 2: NORMALIZE TEXT
             # ================================================================
-            logger.info(f"[{request.doc_id}] Stage 2/6: Normalizing text...")
             stage_start = time.time()
 
             norm_config = NormalizationConfig(
@@ -912,12 +821,10 @@ class DocumentToVectorService:
             )
 
             normalization_time = time.time() - stage_start
-            logger.info(f"[{request.doc_id}] ✅ Normalized in {normalization_time:.2f}s")
 
             # ================================================================
             # STAGE 3: CHUNK DOCUMENT
             # ================================================================
-            logger.info(f"[{request.doc_id}] Stage 3/6: Chunking document...")
             stage_start = time.time()
 
             chunk_config = ChunkingConfig(
@@ -940,15 +847,12 @@ class DocumentToVectorService:
             response.chunks_created = len(chunks)
             response.chunking_time = time.time() - stage_start
 
-            logger.info(f"[{request.doc_id}] ✅ Created {response.chunks_created} chunks in {response.chunking_time:.2f}s")
-
             # ================================================================
             # STAGE 3.5: GENERATE DOCUMENT SUMMARY (Virtual Chunk)
             # ================================================================
             document_title = request.document_title
 
             if self.config.generate_document_summary:
-                logger.info(f"[{request.doc_id}] Stage 3.5/6: Generating document summary...")
                 stage_start = time.time()
 
                 summarizer = DocumentSummarizer(
@@ -963,9 +867,8 @@ class DocumentToVectorService:
                     file_name=request.file_name
                 )
 
-                # Create summary chunk with non-negative index (index 0)
+                # Create summary chunk with non-negative index
                 summary_chunk = summarizer.create_summary_chunk(document_summary)
-                # Override the chunk_index to ensure it's 0, not -1
                 summary_chunk.chunk_index = index_generator.next_index(ContractChunkType.SUMMARY)
                 summary_chunk.chunk_type = ContractChunkType.SUMMARY.value
 
@@ -976,13 +879,9 @@ class DocumentToVectorService:
                 chunks = [summary_chunk] + chunks
                 response.summary_chunks = 1
 
-                summary_time = time.time() - stage_start
-                logger.info(f"[{request.doc_id}] ✅ Generated summary in {summary_time:.2f}s")
-
             # ================================================================
             # STAGE 4: PREPARE EMBEDDINGS WITH CONTRACT PAYLOADS
             # ================================================================
-            logger.info(f"[{request.doc_id}] Stage 4/6: Preparing embeddings with contract payloads...")
             stage_start = time.time()
 
             embedding_records, dedup_stats = prepare_for_embedding(
@@ -994,8 +893,7 @@ class DocumentToVectorService:
 
             response.unique_chunks = dedup_stats.unique_chunks
 
-            # CRITICAL: Inject mandatory metadata into ALL embedding records
-            # This ensures project_id is stored in EVERY Qdrant vector
+            # Inject mandatory metadata into ALL embedding records
             for i, record in enumerate(embedding_records):
                 # Generate consistent chunk index
                 chunk_type = ContractChunkType.CONTENT
@@ -1008,7 +906,7 @@ class DocumentToVectorService:
                 if record.embedding_metadata.get('chunk_index', 0) < 0:
                     record.embedding_metadata['chunk_index'] = index_generator.next_index(chunk_type)
 
-                # MANDATORY: Inject project_id into every record
+                # Inject mandatory metadata
                 record.embedding_metadata['project_id'] = request.project_id
                 record.embedding_metadata['doc_id'] = request.doc_id
 
@@ -1030,12 +928,10 @@ class DocumentToVectorService:
             embeddings = [emb.tolist() for emb in embeddings]
 
             response.embedding_time = time.time() - stage_start
-            logger.info(f"[{request.doc_id}] ✅ Generated {len(embeddings)} embeddings in {response.embedding_time:.2f}s")
 
             # ================================================================
             # STAGE 5: STORE IN QDRANT
             # ================================================================
-            logger.info(f"[{request.doc_id}] Stage 5/6: Storing in Qdrant...")
             stage_start = time.time()
 
             # Collect vector IDs for tracking
@@ -1056,13 +952,10 @@ class DocumentToVectorService:
                 items_failed=upload_stats.get('failed', 0)
             )
 
-            logger.info(f"[{request.doc_id}] ✅ Stored {upload_stats['uploaded']} vectors in Qdrant in {response.qdrant_time:.2f}s")
-
             # ================================================================
             # STAGE 6: INDEX IN OPENSEARCH (Hybrid Keyword Search)
             # ================================================================
             if self.opensearch_store and self.config.opensearch_enabled:
-                logger.info(f"[{request.doc_id}] Stage 6/6: Indexing in OpenSearch...")
                 stage_start = time.time()
 
                 try:
@@ -1127,13 +1020,8 @@ class DocumentToVectorService:
                         items_failed=opensearch_stats.get('failed', 0)
                     )
 
-                    logger.info(
-                        f"[{request.doc_id}] ✅ Indexed {opensearch_stats.get('success', 0)} chunks in OpenSearch "
-                        f"in {response.opensearch_time:.2f}s"
-                    )
-
                 except Exception as e:
-                    logger.error(f"[{request.doc_id}] OpenSearch indexing failed: {e}", exc_info=True)
+                    logger.error(f"OpenSearch indexing failed: {e}")
                     response.opensearch_time = time.time() - stage_start
                     response.opensearch_result = IngestionResult(
                         backend='opensearch',
@@ -1142,15 +1030,17 @@ class DocumentToVectorService:
                     )
 
             # ================================================================
-            # SUCCESS
+            # SUCCESS - Single consolidated summary log
             # ================================================================
             response.status = IngestionStatus.SUCCESS
             response.success = True
             response.total_time = time.time() - start_time
 
+            vectors = response.qdrant_result.items_stored if response.qdrant_result else 0
+            os_info = f" opensearch={response.opensearch_result.items_stored}" if response.opensearch_result and response.opensearch_result.success else ""
             logger.info(
-                f"[{request.doc_id}] ✅ V2 INGESTION COMPLETE in {response.total_time:.2f}s - "
-                f"project_id: {request.project_id}, vectors: {response.qdrant_result.items_stored if response.qdrant_result else 0}"
+                f"✅ {request.file_name} | pages={response.pages_extracted} chunks={response.unique_chunks} "
+                f"vectors={vectors}{os_info} | duration={response.total_time:.2f}s"
             )
 
         except Exception as e:
@@ -1171,7 +1061,7 @@ class DocumentToVectorService:
             else:
                 response.error_stage = "opensearch_storage"
 
-            logger.error(f"[{request.doc_id}] ❌ V2 INGESTION FAILED at {response.error_stage}: {e}")
+            logger.error(f"❌ {request.file_name} | stage={response.error_stage} | error={e}")
 
         return response
 

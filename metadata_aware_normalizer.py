@@ -398,17 +398,14 @@ class MetadataAwareNormalizer:
     """
 
     def __init__(self, config: Optional[NormalizationConfig] = None):
-        logger.info("Initializing MetadataAwareNormalizer")
         self.config = config or NormalizationConfig()
-        logger.debug(f"Config: {self.config}")
         self.protection = ProtectionMarker()
 
-        # NEW: Advanced components
-        logger.debug("Initializing advanced components")
+        # Advanced components
         self.column_detector = MultiColumnDetector(self.config.multi_column_threshold)
         self.hierarchy_preserver = HierarchyPreserver()
         self.crosschecker = MetadataCrossChecker()
-        logger.info("MetadataAwareNormalizer initialization complete")
+        logger.debug("MetadataAwareNormalizer initialized")
 
         # Patterns for structural normalization
         self.hyphen_linebreak_pattern = re.compile(r'(\w+)-\s*\n\s*(\w+)')
@@ -552,40 +549,21 @@ class MetadataAwareNormalizer:
             Tuple of (normalized_full_text, list_of_page_results)
         """
         start_time = time.time()
-        logger.info(
-            f"Starting document normalization - File: {extraction_result.metadata.file_name}, "
-            f"Pages: {len(extraction_result.pages)}"
-        )
 
         page_results = []
         normalized_pages = []
 
         # Filter out TOC pages if configured
-        filter_start = time.time()
         pages_to_process = self._filter_toc_pages(
             extraction_result.pages,
             extraction_result.metadata
         )
-        filter_duration = time.time() - filter_start
-
-        logger.info(
-            f"Page filtering complete - Processing {len(pages_to_process)} pages "
-            f"(filtered {len(extraction_result.pages) - len(pages_to_process)} pages) "
-            f"in {filter_duration:.2f}s"
-        )
+        filtered_count = len(extraction_result.pages) - len(pages_to_process)
 
         # Process each page individually
-        for idx, page_meta in enumerate(pages_to_process, 1):
-            page_start = time.time()
+        for page_meta in pages_to_process:
             page_result = self._normalize_page(page_meta, extraction_result.metadata)
-            page_duration = time.time() - page_start
-
             page_results.append(page_result)
-            logger.debug(
-                f"Page {page_meta.page_number} normalized ({idx}/{len(pages_to_process)}) - "
-                f"Chars: {page_result.original_char_count} → {page_result.normalized_char_count}, "
-                f"Duration: {page_duration:.2f}s"
-            )
 
             # Add page marker if configured
             if self.config.add_page_markers:
@@ -606,12 +584,11 @@ class MetadataAwareNormalizer:
         if total_original_chars > 0:
             reduction_pct = ((total_original_chars - total_normalized_chars) / total_original_chars * 100)
 
+        # Single consolidated log for the entire normalization
         logger.info(
-            f"Document normalization complete - File: {extraction_result.metadata.file_name}, "
-            f"Pages: {len(page_results)}, "
-            f"Chars: {total_original_chars} → {total_normalized_chars} "
-            f"({reduction_pct:.1f}% reduction), "
-            f"Total duration: {total_duration:.2f}s"
+            f"Normalized {len(page_results)} pages | "
+            f"chars={total_original_chars}→{total_normalized_chars} ({reduction_pct:.1f}% reduction) | "
+            f"filtered={filtered_count} | duration={total_duration:.2f}s"
         )
 
         return full_normalized_text, page_results
@@ -619,7 +596,7 @@ class MetadataAwareNormalizer:
     def _filter_toc_pages(self, pages, doc_metadata) -> List:
         """
         Filter out TOC pages if configured.
-        NEW: Also applies skip_pages and force_process_pages rules.
+        Also applies skip_pages and force_process_pages rules.
         """
         filtered_pages = []
 
@@ -628,41 +605,31 @@ class MetadataAwareNormalizer:
 
             # Check skip_pages override
             if page_num in self.config.skip_pages:
-                logger.info(f"Skipping page {page_num} (skip_pages rule)")
                 continue
 
             # Check force_process_pages override
             if page_num in self.config.force_process_pages:
-                logger.info(f"Force processing page {page_num} (force_process_pages rule)")
                 filtered_pages.append(page)
                 continue
 
             # Check TOC pages
             if self.config.remove_toc_pages and doc_metadata.has_toc:
                 if page_num in doc_metadata.toc_page_numbers:
-                    logger.info(f"Removing page {page_num} (TOC page)")
                     continue
 
             # Page passes all filters
             filtered_pages.append(page)
 
-        removed_count = len(pages) - len(filtered_pages)
-        if removed_count > 0:
-            logger.info(f"Filtered out {removed_count} page(s)")
-
         # Safety check: Never filter out ALL pages
         if len(filtered_pages) == 0 and len(pages) > 0:
-            logger.warning(
-                f"All {len(pages)} page(s) were filtered out! "
-                f"This is likely incorrect. Keeping all pages to prevent data loss."
-            )
+            logger.warning(f"All {len(pages)} pages filtered - keeping all to prevent data loss")
             return pages
 
         return filtered_pages
 
     def normalize_page(self, page_meta, doc_metadata=None) -> PageNormalizationResult:
         """
-        NEW: Per-page normalizer entrypoint.
+        Per-page normalizer entrypoint.
         Normalize a single page independently.
 
         Args:
@@ -672,7 +639,6 @@ class MetadataAwareNormalizer:
         Returns:
             PageNormalizationResult
         """
-        logger.info(f"Normalizing page {page_meta.page_number}")
         return self._normalize_page(page_meta, doc_metadata)
 
     def _normalize_page(self, page_meta, doc_metadata) -> PageNormalizationResult:
@@ -686,7 +652,6 @@ class MetadataAwareNormalizer:
         Returns:
             PageNormalizationResult
         """
-        logger.debug(f"Normalization: Starting page {page_meta.page_number}")
         text = page_meta.text
         original_char_count = len(text)
         original_word_count = len(text.split())
@@ -695,7 +660,6 @@ class MetadataAwareNormalizer:
         removed_page_numbers = []
 
         # Step 1: Protect special elements
-        logger.debug(f"Normalization: Page {page_meta.page_number} - Step 1: Protecting special elements")
         protect_config = {
             'code_blocks': self.config.protect_code_blocks,
             'tables': self.config.protect_tables,
@@ -712,116 +676,90 @@ class MetadataAwareNormalizer:
 
         if protected_elements:
             changes_applied.append(f"Protected {len(protected_elements)} elements")
-            logger.debug(f"Normalization: Page {page_meta.page_number} - Protected {len(protected_elements)} elements")
 
-        # NEW: Detect and handle multi-column layout
+        # Detect and handle multi-column layout
         if self.config.detect_multi_column:
             if self.column_detector.detect_columns(text):
-                logger.debug(f"Normalization: Page {page_meta.page_number} - Multi-column layout detected")
                 text = self.column_detector.split_columns(text)
                 changes_applied.append("Converted multi-column layout")
 
-        # NEW: Preserve hierarchy if configured
+        # Preserve hierarchy if configured
         if self.config.preserve_hierarchy:
             hierarchy = self.hierarchy_preserver.extract_hierarchy(text)
             if hierarchy:
-                logger.debug(f"Normalization: Page {page_meta.page_number} - Preserving hierarchy ({len(hierarchy)} levels)")
                 text = self.hierarchy_preserver.add_hierarchy_markers(text)
                 changes_applied.append(f"Preserved hierarchy ({len(hierarchy)} levels)")
 
         # Step 2: Structural normalizations
-        logger.debug(f"Normalization: Page {page_meta.page_number} - Step 2: Structural normalizations")
         if self.config.normalize_line_breaks:
             text = self._normalize_line_breaks(text)
-            changes_applied.append("Normalized line breaks")
 
         if self.config.remove_hyphen_line_breaks:
             text = self._remove_hyphen_line_breaks(text)
-            changes_applied.append("Removed hyphen line breaks")
 
         # Step 3: Metadata-aware noise removal
-        logger.debug(f"Normalization: Page {page_meta.page_number} - Step 3: Metadata-aware noise removal")
         if self.config.remove_urls and page_meta.urls:
             text, removed = self._remove_urls_from_metadata(text, page_meta.urls)
             removed_urls.extend(removed)
             if removed:
-                logger.debug(f"Normalization: Page {page_meta.page_number} - Removed {len(removed)} URLs")
                 changes_applied.append(f"Removed {len(removed)} URLs")
 
         if self.config.remove_page_numbers:
             text, removed = self._remove_page_numbers_for_page(text, page_meta.page_number)
             removed_page_numbers.extend(removed)
-            if removed:
-                logger.debug(f"Normalization: Page {page_meta.page_number} - Removed page number")
-                changes_applied.append(f"Removed page number")
 
         if self.config.remove_headers_footers:
             text = self._remove_headers_footers(text)
-            changes_applied.append("Removed headers/footers")
 
-        # Step 4: OCR corrections (conservative)
-        logger.debug(f"Normalization: Page {page_meta.page_number} - Step 4: OCR corrections")
+        # Step 4: OCR corrections
         if self.config.fix_ligatures:
             text = self._fix_ligatures(text)
-            changes_applied.append("Fixed ligatures")
 
         if self.config.apply_ocr_corrections:
             text = self._apply_ocr_corrections(text)
-            changes_applied.append("Applied OCR corrections")
 
-        # Step 5: Semantic normalizations (improved)
-        logger.debug(f"Normalization: Page {page_meta.page_number} - Step 5: Semantic normalizations")
+        # Step 5: Semantic normalizations
         if self.config.merge_hyphenated_words:
             text = self._merge_hyphenated_words(text)
-            changes_applied.append("Merged hyphenated words")
 
         if self.config.fix_broken_sentences:
             text = self._fix_broken_sentences_safe(text)
-            changes_applied.append("Fixed broken sentences")
 
         if self.config.normalize_bullet_points and not self.config.protect_bullet_points:
             text = self._normalize_bullet_points(text)
-            changes_applied.append("Normalized bullet points")
 
         # Step 6: Final cleanup
-        logger.debug(f"Normalization: Page {page_meta.page_number} - Step 6: Final cleanup")
         if self.config.collapse_whitespace:
             text = self._collapse_whitespace(text)
-            changes_applied.append("Collapsed whitespace")
 
         if self.config.collapse_blank_lines:
             text = self._collapse_blank_lines(text)
-            changes_applied.append("Collapsed blank lines")
 
         if self.config.unicode_normalize:
             text = unicodedata.normalize('NFKC', text)
-            changes_applied.append("Unicode normalized")
 
         # Step 7: Restore protected elements
-        logger.debug(f"Normalization: Page {page_meta.page_number} - Step 7: Restoring protected elements")
         text = self.protection.restore_text(text)
 
-        # BUG FIX: Step 7.5: Inject hierarchy markers from metadata
-        # This ensures headings maintain their structural role and are recognizable to the chunker
+        # Inject hierarchy markers from metadata for chunker recognition
         if page_meta.headings and self.config.protect_headings:
-            logger.debug(f"Normalization: Page {page_meta.page_number} - Step 7.5: Injecting hierarchy from metadata ({len(page_meta.headings)} headings)")
             text = self._inject_hierarchy_from_metadata(text, page_meta.headings)
-            changes_applied.append(f"Injected hierarchy for {len(page_meta.headings)} headings")
+            changes_applied.append(f"Injected {len(page_meta.headings)} headings")
 
-        # Step 8: Final cleanup
+        # Final trim
         text = text.strip()
 
-        # NEW: Step 9: Cross-check with metadata
+        # Cross-check with metadata (only log warnings for significant issues)
         warnings = []
         if self.config.enable_metadata_crosscheck:
             warnings = self.crosschecker.crosscheck(text, page_meta, page_meta.text)
-            if warnings:
-                for warning in warnings:
+            # Only log if there's excessive text loss (>50%)
+            for warning in warnings:
+                if "Excessive text loss" in warning:
                     logger.warning(f"Page {page_meta.page_number}: {warning}")
-                changes_applied.append(f"Crosscheck: {len(warnings)} warnings")
 
         # Create result
-        result = PageNormalizationResult(
+        return PageNormalizationResult(
             page_number=page_meta.page_number,
             normalized_text=text,
             original_char_count=original_char_count,
@@ -833,16 +771,6 @@ class MetadataAwareNormalizer:
             protected_elements=protected_elements,
             changes_applied=changes_applied
         )
-
-        char_reduction = original_char_count - len(text)
-        reduction_pct = (char_reduction / original_char_count * 100) if original_char_count > 0 else 0
-        logger.debug(
-            f"Normalization: Page {page_meta.page_number} complete - "
-            f"Chars: {original_char_count} → {len(text)} ({reduction_pct:.1f}% reduction), "
-            f"Changes: {', '.join(changes_applied[:5])}{'...' if len(changes_applied) > 5 else ''}"
-        )
-
-        return result
 
     # Structural normalization methods
 

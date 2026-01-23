@@ -41,6 +41,13 @@ except ImportError:
     logger.warning("Qdrant client not installed. Install with: pip install qdrant-client")
 
 
+def qdrant_id_from_chunk_id(chunk_id: str) -> str:
+    """
+    Generate a deterministic UUID for Qdrant from chunk_id.
+    """
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, chunk_id))
+
+
 # -------------------------------------------------------------------
 # CONFIG
 # -------------------------------------------------------------------
@@ -257,7 +264,7 @@ class QdrantStorage:
 
             points = [
                 PointStruct(
-                    id=str(uuid.uuid4()),
+                    id=qdrant_id_from_chunk_id(rec.chunk_id),
                     vector=vec,
                     payload=rec.to_qdrant_payload()
                 )
@@ -300,7 +307,7 @@ class QdrantStorage:
 
         point_structs = [
             PointStruct(
-                id=str(uuid.uuid5(uuid.NAMESPACE_DNS, p['id'])),
+                id=qdrant_id_from_chunk_id(p['id']),   # where p['id'] == chunk_id,
                 vector=p['vector'],
                 payload={**p['payload'], 'original_id': p['id']}
             )
@@ -470,7 +477,7 @@ class QdrantStorage:
     def update_metadata(self, point_id: str, metadata: Dict):
         logger.info(f"Updating metadata for point '{point_id}' - Fields: {list(metadata.keys())}")
         try:
-            qdrant_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, point_id))
+            qdrant_id = qdrant_id_from_chunk_id(point_id)
             self.client.set_payload(
                 collection_name=self.config.collection_name,
                 payload=metadata,
@@ -501,7 +508,7 @@ class QdrantStorage:
     def get_by_id(self, point_id: str):
         logger.debug(f"Retrieving point by ID: {point_id}")
         try:
-            qdrant_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, point_id))
+            qdrant_id = qdrant_id_from_chunk_id(point_id)
             results = self.client.retrieve(
                 collection_name=self.config.collection_name,
                 ids=[qdrant_id],

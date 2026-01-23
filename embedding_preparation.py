@@ -41,6 +41,8 @@ class EmbeddingRecord:
 
     # Source tracking
     doc_id: str
+    project_id: str             
+    chunk_type: str              
     file_name: str
     page_number_start: int
     page_number_end: int
@@ -153,6 +155,13 @@ class EmbeddingRecord:
             'contains_bullets': self.contains_bullets,
             'has_urls': self.has_urls,
 
+
+            "project_id": self.project_id,
+            "chunk_type": self.chunk_type,
+            # "text": self.text,
+            "page_number_start": self.page_number_start,
+            "page_number_end": self.page_number_end,
+
             # Text content
             'text': self.embedding_input_text,
 
@@ -175,8 +184,8 @@ class EmbeddingRecord:
         }
 
         # Add project_id as top-level field for efficient filtering (multi-tenancy)
-        if project_id:
-            payload['project_id'] = project_id
+        # if project_id:
+        #     payload['project_id'] = project_id
 
         return payload
 
@@ -483,13 +492,17 @@ class EmbeddingPreparationPipeline:
             # Step 4: Build metadata
             embedding_metadata = self.metadata_builder.build_embedding_metadata(chunk)
 
+            canonical_chunk_id = f"{chunk.doc_id}_chunk_{chunk.chunk_index:04d}"
+
             # Step 5: Create embedding record
             record = EmbeddingRecord(
-                chunk_id=chunk.chunk_id,
-                embedding_id=f"{chunk.doc_id}_emb_{chunk.chunk_index:04d}",
+                chunk_id=canonical_chunk_id,
+                embedding_id=f"{canonical_chunk_id}_emb",
                 embedding_hash=embedding_hash,
                 embedding_input_text=embedding_input_text,
                 doc_id=chunk.doc_id,
+                project_id=chunk.project_id,        
+                chunk_type=chunk.chunk_type,        
                 file_name=chunk.file_name,
                 page_number_start=chunk.page_number_start,
                 page_number_end=chunk.page_number_end,
@@ -514,7 +527,7 @@ class EmbeddingPreparationPipeline:
             )
 
             embedding_records.append(record)
-            seen_hashes[embedding_hash] = chunk.chunk_id
+            seen_hashes[embedding_hash] = canonical_chunk_id
 
         # Step 6: Calculate deduplication stats
         stats = DeduplicationStats(

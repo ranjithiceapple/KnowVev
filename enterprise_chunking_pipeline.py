@@ -626,16 +626,13 @@ class EnterpriseChunkingPipeline:
     """
 
     def __init__(self, config: Optional[ChunkingConfig] = None):
-        logger.info("Initializing EnterpriseChunkingPipeline")
         self.config = config or ChunkingConfig()
-        logger.info(
-            f"Chunking config - Max size: {self.config.max_chunk_size}, "
-            f"Min size: {self.config.min_chunk_size}, Target size: {self.config.target_chunk_size}, "
-            f"Overlap: {self.config.enable_overlap} ({self.config.overlap_size} chars)"
-        )
         self.boundary_detector = BoundaryDetector()
         self.semantic_chunker = SemanticChunker(self.config)
-        logger.info("EnterpriseChunkingPipeline initialization complete")
+        logger.debug(
+            f"ChunkingPipeline init | max={self.config.max_chunk_size} "
+            f"target={self.config.target_chunk_size} overlap={self.config.overlap_size}"
+        )
 
     def chunk_document(
         self,
@@ -658,77 +655,38 @@ class EnterpriseChunkingPipeline:
 
         if doc_id is None:
             doc_id = str(uuid.uuid4())
-            logger.debug(f"Generated doc_id: {doc_id}")
 
         # Use normalized text if provided, otherwise use extracted text
         text = normalized_text if normalized_text else extraction_result.text
 
-        logger.info(
-            f"Starting chunking for document: {extraction_result.metadata.file_name} "
-            f"(doc_id: {doc_id[:8]}...)"
-        )
-        logger.info(f"Document length: {len(text)} characters, {len(extraction_result.pages)} pages")
-
-        # Step 1: Page-level chunking with mapping
-        logger.debug(f"Chunking: Starting Step 1 - Page-level chunking")
-        step_start = time.time()
+        # Step 1: Page-level chunking
         page_chunks = self._chunk_by_pages(text, extraction_result)
-        step_duration = time.time() - step_start
-        logger.info(f"Step 1: Created {len(page_chunks)} page-level chunks in {step_duration:.2f}s")
-        logger.debug(f"Chunking: Page chunks size range: {min((len(c['text']) for c in page_chunks), default=0)} - {max((len(c['text']) for c in page_chunks), default=0)} chars")
 
         # Step 2: Section-aware chunking
-        logger.debug(f"Chunking: Starting Step 2 - Section-aware chunking")
-        step_start = time.time()
         section_chunks = self._chunk_by_sections(page_chunks, extraction_result)
-        step_duration = time.time() - step_start
-        logger.info(f"Step 2: Created {len(section_chunks)} section-aware chunks in {step_duration:.2f}s")
-        logger.debug(f"Chunking: Section chunks created from {len(page_chunks)} page chunks")
 
-        # Step 3: Apply size constraints and split large chunks
-        logger.debug(f"Chunking: Starting Step 3 - Applying size constraints (max: {self.config.max_chunk_size})")
-        step_start = time.time()
+        # Step 3: Apply size constraints
         sized_chunks = self._apply_size_constraints(section_chunks)
-        step_duration = time.time() - step_start
-        split_count = len(sized_chunks) - len(section_chunks)
-        logger.info(f"Step 3: Applied size constraints, now {len(sized_chunks)} chunks in {step_duration:.2f}s")
-        if split_count > 0:
-            logger.debug(f"Chunking: Split {split_count} large chunks to meet size constraints")
 
         # Step 4: Apply semantic windowing (overlap)
-        logger.debug(f"Chunking: Starting Step 4 - Semantic windowing (overlap: {self.config.overlap_size if self.config.enable_overlap else 0})")
-        step_start = time.time()
         overlapped_chunks = self._apply_semantic_windowing(sized_chunks)
-        step_duration = time.time() - step_start
-        logger.info(f"Step 4: Applied semantic windowing in {step_duration:.2f}s")
 
         # Step 5: Build comprehensive metadata
-        logger.debug(f"Chunking: Starting Step 5 - Building chunk metadata")
-        step_start = time.time()
         final_chunks = self._build_chunk_metadata(
             overlapped_chunks,
             extraction_result,
             doc_id
         )
-        step_duration = time.time() - step_start
-        logger.info(f"Step 5: Built metadata for {len(final_chunks)} final chunks in {step_duration:.2f}s")
-
-        # Log chunk statistics
-        if final_chunks:
-            avg_size = sum(c.chunk_char_len for c in final_chunks) / len(final_chunks)
-            logger.debug(
-                f"Chunking: Final statistics - "
-                f"Chunks: {len(final_chunks)}, "
-                f"Avg size: {avg_size:.0f} chars, "
-                f"Min: {min(c.chunk_char_len for c in final_chunks)}, "
-                f"Max: {max(c.chunk_char_len for c in final_chunks)}"
-            )
 
         total_duration = time.time() - start_time
-        logger.info(
-            f"Chunking complete for {extraction_result.metadata.file_name} - "
-            f"Final chunks: {len(final_chunks)}, Total time: {total_duration:.2f}s"
-        )
+
+        # Single consolidated log with key metrics
+        if final_chunks:
+            avg_size = sum(c.chunk_char_len for c in final_chunks) / len(final_chunks)
+            logger.info(
+                f"Chunked {len(extraction_result.pages)} pages → {len(final_chunks)} chunks | "
+                f"avg={avg_size:.0f} chars | duration={total_duration:.2f}s"
+            )
 
         return final_chunks
 
@@ -737,14 +695,11 @@ class EnterpriseChunkingPipeline:
         Step 1: Page-level chunking.
         Preserves page boundaries and mapping.
         """
-        logger.debug("Chunking: Starting page-level chunking")
         chunks = []
         page_boundaries = self.boundary_detector.find_page_boundaries(text)
-        logger.debug(f"Chunking: Found {len(page_boundaries)} page boundaries")
 
         if not page_boundaries:
             # No page markers found - treat as single page
-            logger.warning("Chunking: No page markers found, treating as single page")
             chunks.append({
                 'text': text,
                 'page_start': 1,
@@ -772,8 +727,6 @@ class EnterpriseChunkingPipeline:
                     None
                 )
 
-                logger.debug(f"Chunking: Page {page_num} - {len(page_text)} chars")
-
                 chunks.append({
                     'text': page_text,
                     'page_start': page_num,
@@ -781,7 +734,6 @@ class EnterpriseChunkingPipeline:
                     'original_page': original_page
                 })
 
-        logger.debug(f"Chunking: Page-level chunking complete - {len(chunks)} chunks created")
         return chunks
 
     def _find_section_boundaries_enhanced(
@@ -813,8 +765,6 @@ class EnterpriseChunkingPipeline:
         if not structured_headings:
             return []
 
-        logger.info(f"📍 Heading-aware chunking: Using {len(structured_headings)} structured headings for boundary detection")
-
         boundaries = []
 
         # For each structured heading, find its position in the text
@@ -825,10 +775,10 @@ class EnterpriseChunkingPipeline:
             # Extract numeric level
             level = int(level_str[1]) if len(level_str) > 1 and level_str[1].isdigit() else 2
 
-            # Search for the heading in markdown format first (# Heading, ## Heading, etc.)
+            # Search for the heading in markdown format first
             markdown_patterns = [
-                rf'^{"#" * level}\s+{re.escape(heading_text)}\s*$',  # Exact markdown
-                rf'^{"#" * level}\s+{re.escape(heading_text)}',  # Markdown at start
+                rf'^{"#" * level}\s+{re.escape(heading_text)}\s*$',
+                rf'^{"#" * level}\s+{re.escape(heading_text)}',
             ]
 
             position = None
@@ -836,26 +786,21 @@ class EnterpriseChunkingPipeline:
                 match = re.search(pattern, text, re.MULTILINE)
                 if match:
                     position = match.start()
-                    logger.debug(f"Found markdown heading '{heading_text}' at position {position}")
                     break
 
             # If not found in markdown format, search for plain text heading
             if position is None:
-                # Try to find the heading as standalone line
                 pattern = rf'(^|\n)[ \t]*{re.escape(heading_text)}[ \t]*($|\n)'
                 match = re.search(pattern, text, re.MULTILINE)
                 if match:
                     position = match.start()
-                    logger.debug(f"Found plain text heading '{heading_text}' at position {position}")
 
             # Add to boundaries if found
             if position is not None:
                 boundaries.append((position, heading_text, level))
 
-        # Sort by position (headings should appear in document order)
+        # Sort by position
         boundaries.sort(key=lambda x: x[0])
-
-        logger.debug(f"Enhanced boundary detection found {len(boundaries)} headings in text")
         return boundaries
 
     def _chunk_by_sections(self, page_chunks: List[Dict], extraction_result) -> List[Dict]:
@@ -875,28 +820,15 @@ class EnterpriseChunkingPipeline:
             page_end = page_chunk['page_end']
             original_page = page_chunk['original_page']
 
-            # ENHANCED: Try to use structured headings first (from font/style analysis)
+            # Try to use structured headings first (from font/style analysis)
             section_boundaries = self._find_section_boundaries_enhanced(
                 text,
                 original_page
             )
 
-            # Track which method was used for logging
-            used_structured = len(section_boundaries) > 0 if section_boundaries else False
-
             # Fallback: Use regex-based detection if no structured headings available
-            if not section_boundaries and not self.config.prefer_structured_over_regex:
-                logger.debug(f"Page {page_start}: No structured headings, falling back to regex detection")
+            if not section_boundaries:
                 section_boundaries = self.boundary_detector.find_section_boundaries(text)
-            elif not section_boundaries:
-                logger.debug(f"Page {page_start}: No structured headings and prefer_structured_over_regex=True")
-                section_boundaries = self.boundary_detector.find_section_boundaries(text)
-
-            # Log which method was successful
-            if section_boundaries and used_structured:
-                logger.info(f"✅ Page {page_start}: Using {len(section_boundaries)} STRUCTURED headings (font-based)")
-            elif section_boundaries:
-                logger.debug(f"Page {page_start}: Using {len(section_boundaries)} regex-detected headings (fallback)")
 
             if not section_boundaries:
                 # No sections found - keep as single chunk without placeholder section name
@@ -978,7 +910,6 @@ class EnterpriseChunkingPipeline:
                 continue
 
             # Chunk is too large - need to split
-            logger.debug(f"Splitting large chunk ({len(text)} chars)")
 
             # Find special blocks that should be kept intact
             special_blocks = self.boundary_detector.find_special_blocks(text)
@@ -1256,7 +1187,6 @@ class EnterpriseChunkingPipeline:
         for chunk in heading_chunks:
             chunk.total_chunks = len(heading_chunks)
 
-        logger.info(f"Generated {len(heading_chunks)} heading-only chunks")
         return heading_chunks
 
     def _generate_clause_chunks(
@@ -1387,7 +1317,6 @@ class EnterpriseChunkingPipeline:
         for chunk in clause_chunks:
             chunk.total_chunks = len(clause_chunks)
 
-        logger.info(f"Generated {len(clause_chunks)} clause-level chunks")
         return clause_chunks
 
     def _generate_metadata_chunks(
@@ -1484,7 +1413,6 @@ class EnterpriseChunkingPipeline:
 
         metadata_chunks.append(metadata_chunk)
 
-        logger.info(f"Generated {len(metadata_chunks)} metadata chunks")
         return metadata_chunks
 
     def _generate_summary_chunks(
@@ -1609,7 +1537,6 @@ class EnterpriseChunkingPipeline:
         for chunk in summary_chunks:
             chunk.total_chunks = len(summary_chunks)
 
-        logger.info(f"Generated {len(summary_chunks)} summary chunks")
         return summary_chunks
 
     def generate_hybrid_chunks(
@@ -1639,8 +1566,6 @@ class EnterpriseChunkingPipeline:
         """
         if doc_id is None:
             doc_id = str(uuid.uuid4())
-
-        logger.info(f"Generating hybrid chunks for document: {extraction_result.metadata.file_name}")
 
         # Generate standard content chunks first
         content_chunks = self.chunk_document(extraction_result, doc_id, normalized_text)
@@ -1678,15 +1603,11 @@ class EnterpriseChunkingPipeline:
                 content_chunks, extraction_result, doc_id
             )
 
-        # Log summary
-        total_chunks = sum(len(chunks) for chunks in hybrid_chunks.values())
+        # Single consolidated log for hybrid chunking
         logger.info(
-            f"Hybrid chunking complete - Total: {total_chunks} chunks "
-            f"(content: {len(hybrid_chunks['content'])}, "
-            f"heading: {len(hybrid_chunks['heading'])}, "
-            f"clause: {len(hybrid_chunks['clause'])}, "
-            f"metadata: {len(hybrid_chunks['metadata'])}, "
-            f"summary: {len(hybrid_chunks['summary'])})"
+            f"Hybrid chunks: content={len(hybrid_chunks['content'])} "
+            f"clause={len(hybrid_chunks['clause'])} heading={len(hybrid_chunks['heading'])} "
+            f"metadata={len(hybrid_chunks['metadata'])} summary={len(hybrid_chunks['summary'])}"
         )
 
         return hybrid_chunks
