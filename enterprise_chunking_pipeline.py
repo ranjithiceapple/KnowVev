@@ -677,7 +677,8 @@ class EnterpriseChunkingPipeline:
         final_chunks = self._build_chunk_metadata(
             overlapped_chunks,
             extraction_result,
-            doc_id
+            doc_id,
+            project_id  # Pass project_id for multi-tenancy
         )
 
         total_duration = time.time() - start_time
@@ -1046,10 +1047,17 @@ class EnterpriseChunkingPipeline:
         self,
         chunks: List[Dict],
         extraction_result,
-        doc_id: str
+        doc_id: str,
+        project_id: Optional[str] = None
     ) -> List[ChunkMetadata]:
         """
         Step 5: Build comprehensive metadata for each chunk.
+
+        Args:
+            chunks: List of chunk dictionaries
+            extraction_result: Document extraction result
+            doc_id: Document ID
+            project_id: Optional project ID for multi-tenancy
         """
         chunk_metadatas = []
         total_chunks = len(chunks)
@@ -1822,91 +1830,3 @@ if __name__ == "__main__":
     print("  ✅ Metadata-only chunks - for document filtering")
     print("  ✅ Summary chunks - for high-level document matching")
     print("\nUsage example:")
-    print("""
-from document_processor import extract_text_from_document
-from enterprise_chunking_pipeline import (
-    chunk_document_simple,
-    chunk_for_hybrid_search,
-    get_hybrid_config,
-    ChunkingConfig,
-    ChunkType
-)
-
-# Extract document
-result = extract_text_from_document('document.pdf', extract_metadata=True)
-
-# Simple chunking (content only)
-chunks = chunk_document_simple(result, max_chunk_size=1000)
-
-# ============================================
-# HYBRID SEARCH CHUNKING (NEW!)
-# ============================================
-
-# Quick hybrid chunking with convenience function
-hybrid_chunks = chunk_for_hybrid_search(
-    result,
-    max_chunk_size=1000,
-    generate_heading_chunks=True,
-    generate_clause_chunks=True,
-    generate_metadata_chunks=True,
-    generate_summary_chunks=True
-)
-
-# Access different chunk types
-content_chunks = hybrid_chunks['content']   # Standard semantic chunks
-heading_chunks = hybrid_chunks['heading']   # Section titles only
-clause_chunks = hybrid_chunks['clause']     # Single sentences
-metadata_chunks = hybrid_chunks['metadata'] # Document metadata
-summary_chunks = hybrid_chunks['summary']   # Document/section summaries
-
-print(f"Generated chunks for hybrid search:")
-print(f"  Content: {len(content_chunks)} chunks")
-print(f"  Headings: {len(heading_chunks)} chunks")
-print(f"  Clauses: {len(clause_chunks)} chunks")
-print(f"  Metadata: {len(metadata_chunks)} chunks")
-print(f"  Summaries: {len(summary_chunks)} chunks")
-
-# Advanced hybrid chunking with full config
-config = ChunkingConfig(
-    max_chunk_size=1000,
-    target_chunk_size=500,
-    enable_overlap=True,
-    overlap_size=100,
-    # Hybrid search options
-    generate_heading_chunks=True,
-    generate_clause_chunks=True,
-    generate_metadata_chunks=True,
-    generate_summary_chunks=True,
-    # Clause options
-    clause_min_length=20,
-    clause_max_length=300,
-    # Summary options
-    summary_sentences=3,
-    generate_document_summary=True,
-    generate_section_summaries=True
-)
-
-from enterprise_chunking_pipeline import EnterpriseChunkingPipeline
-pipeline = EnterpriseChunkingPipeline(config)
-hybrid_chunks = pipeline.generate_hybrid_chunks(result)
-
-# Get all chunks as flat list (useful for bulk indexing)
-all_chunks = pipeline.get_all_chunks_flat(hybrid_chunks)
-
-# Filter by chunk type
-for chunk in all_chunks:
-    if chunk.chunk_type == ChunkType.HEADING.value:
-        print(f"Heading: {chunk.normalized_text}")
-    elif chunk.chunk_type == ChunkType.SUMMARY.value:
-        print(f"Summary: {chunk.normalized_text[:100]}...")
-
-# Access chunk metadata
-for chunk in hybrid_chunks['content'][:3]:
-    print(f"Chunk {chunk.chunk_index + 1}/{chunk.total_chunks}")
-    print(f"  Type: {chunk.chunk_type}")
-    print(f"  Pages: {chunk.page_number_start}-{chunk.page_number_end}")
-    print(f"  Section: {chunk.section_title}")
-    print(f"  Path: {' > '.join(chunk.heading_path)}")
-    print(f"  Size: {chunk.chunk_char_len} chars, {chunk.chunk_word_count} words")
-    print(f"  Content: {chunk.normalized_text[:100]}...")
-    """)

@@ -728,39 +728,3 @@ if __name__ == "__main__":
     print("  ✅ Re-indexing without re-embedding")
     print("  ✅ Version tracking")
     print("\nUsage example:")
-    print("""
-from enterprise_chunking_pipeline import chunk_document_simple
-from embedding_preparation import prepare_for_embedding, EmbeddingExporter
-
-# Get chunks
-chunks = chunk_document_simple(extraction_result)
-
-# Prepare for embedding
-embedding_records, stats = prepare_for_embedding(
-    chunks,
-    deduplicate=True,
-    version="1.0"
-)
-
-print(f"Unique chunks: {stats.unique_chunks}")
-print(f"Duplicates removed: {stats.duplicate_chunks}")
-
-# Use records
-for record in embedding_records:
-    # Generate embedding
-    embedding = model.encode(record.embedding_input_text)
-
-    # Store in vector DB
-    qdrant_client.upsert(
-        collection_name="documents",
-        points=[{
-            'id': record.embedding_id,
-            'vector': embedding,
-            'payload': record.to_qdrant_payload()
-        }]
-    )
-
-# Export
-EmbeddingExporter.export_to_json(embedding_records, 'embeddings.json')
-EmbeddingExporter.export_to_qdrant_format(embedding_records, 'qdrant_points.json')
-    """)

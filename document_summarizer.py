@@ -14,7 +14,6 @@ import re
 from typing import List, Dict, Optional, Any
 from dataclasses import dataclass
 from datetime import datetime
-import hashlib
 from logger_config import get_logger
 
 logger = get_logger(__name__)
@@ -429,23 +428,4 @@ if __name__ == "__main__":
     print("  ✅ Hybrid summarization (combine both)")
     print("  ✅ Virtual chunk creation for embedding")
     print("\nUsage:")
-    print("""
-from document_summarizer import generate_document_summary, DocumentSummarizer
 
-# Generate summary
-summary = generate_document_summary(
-    chunks=chunks,
-    extraction_result=extraction_result,
-    doc_id=doc_id,
-    file_name=file_name,
-    max_length=2000,
-    method='hybrid'
-)
-
-# Create virtual chunk
-summarizer = DocumentSummarizer()
-summary_chunk = summarizer.create_summary_chunk(summary)
-
-# Add to chunks for embedding
-all_chunks = [summary_chunk] + chunks
-""")
